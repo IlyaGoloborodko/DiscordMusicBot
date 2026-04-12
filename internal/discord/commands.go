@@ -3,6 +3,7 @@ package discord
 import (
 	"discordAudio/internal/config"
 	"discordAudio/internal/voice"
+	"fmt"
 	"log"
 
 	"github.com/bwmarrin/discordgo"
@@ -12,6 +13,19 @@ var (
 	commands = []*discordgo.ApplicationCommand{
 		{
 			Name:        "play",
+			Description: "play Music",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Name:         "query",
+					Description:  "Type something",
+					Type:         discordgo.ApplicationCommandOptionString,
+					Required:     true,
+					Autocomplete: true,
+				},
+			},
+		},
+		{
+			Name:        "radio",
 			Description: "play Radio",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
@@ -31,6 +45,12 @@ var (
 
 	commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate){
 		"play": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+			err := voice.PlayMusic(s, i)
+			if err != nil {
+				log.Fatal("error processing Play command,", err)
+			}
+		},
+		"radio": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			err := voice.PlayRadio(s, i)
 			if err != nil {
 				log.Fatal("error processing Play command,", err)
@@ -78,7 +98,9 @@ func RegisterCommands(s *discordgo.Session) error {
 		go func() {
 			switch i.Type {
 			case discordgo.InteractionApplicationCommandAutocomplete:
-				voice.Search(s, i)
+				if err := voice.Search(s, i, i.ApplicationCommandData().Name); err != nil {
+					fmt.Println(err)
+				}
 			case discordgo.InteractionApplicationCommand:
 				if h, ok := commandHandlers[i.ApplicationCommandData().Name]; ok {
 					h(s, i)

@@ -1,79 +1,84 @@
 package voice
 
 import (
+	"discordAudio/internal/music"
 	"discordAudio/internal/radio"
+	"fmt"
 	"log"
-	"strings"
 
 	"github.com/bwmarrin/discordgo"
 )
 
-func searchRadio(query string) ([]radio.Station, error) {
-	content := strings.ToLower(query)
-
-	keyword := strings.TrimSpace(strings.TrimPrefix(content, "!search "))
-	matches := searchStations(keyword)
-
-	if len(matches) == 0 {
-		return nil, nil
+func Search(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName string) error {
+	if len(i.ApplicationCommandData().Options) == 0 {
+		return nil
 	}
-	maxCount := 10
-	if len(matches) < maxCount {
-		maxCount = len(matches)
-	}
-	return matches, nil
-}
-
-func searchStations(term string) []radio.Station {
-	term = strings.ToLower(term)
-	res := make([]radio.Station, 0)
-	for _, st := range radio.AllStations {
-		if strings.Contains(strings.ToLower(st.Name), term) ||
-			strings.Contains(strings.ToLower(st.Country), term) {
-			res = append(res, st)
-		}
-	}
-	return res
-}
-func Search(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	query := i.ApplicationCommandData().Options[0].StringValue()
 
-	choices := []*discordgo.ApplicationCommandOptionChoice{}
-	foundRadios, err := searchRadio(query)
-	if err != nil {
+	switch cmdName {
+	case "play":
+		return SearchMusic(s, i, query)
+	case "radio":
+		return SearchRadio(s, i, query)
+	default:
+		return nil
 	}
-	for _, r := range foundRadios {
-		displayName := r.Name
+}
+
+func SearchRadio(s *discordgo.Session, i *discordgo.InteractionCreate, query string) error {
+	found := radio.SearchRadio(query)
+	choices := make([]*discordgo.ApplicationCommandOptionChoice, 0, 10)
+	for _, r := range found {
+		name := r.Name
 		if r.Country != "" {
-			displayName += " (" + r.Country + ")"
+			name += " (" + r.Country + ")"
 		}
-
-		if len(displayName) > 100 {
-			displayName = displayName[:100]
+		if len(name) > 100 {
+			name = name[:100]
 		}
-
-		if len(displayName) == 0 {
-			displayName = "Unknown Station"
-		}
-
 		choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
-			Name:  displayName,
+			Name:  name,
 			Value: r.StationUUID,
 		})
-		if len(choices) >= 25 {
-			break
-		}
 	}
-	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionApplicationCommandAutocompleteResult, // 🔑 тип для автодополнения
+
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
 		Data: &discordgo.InteractionResponseData{
 			Choices: choices,
 		},
 	})
+}
+
+func SearchMusic(s *discordgo.Session, i *discordgo.InteractionCreate, query string) error {
+	tracks, err := music.Search(query)
 	if err != nil {
-		log.Fatalf("Failed to interact interaction: %v", err)
+		return err
 	}
 
-	return nil
+	choices := make([]*discordgo.ApplicationCommandOptionChoice, 0, 10)
+	for _, t := range tracks {
+		name := t.Title
+		if t.Uploader != "" {
+			name = fmt.Sprintf("%s — %s", t.Title, t.Uploader)
+		}
 
+		choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+			Name:  name,
+			Value: t.ID, // важно: сюда кладём ID видео, а не текст
+		})
+
+		if len(choices) == 10 {
+			break
+		}
+	}
+
+	log.Println("music autocomplete:", query, "results:", len(choices))
+
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+		Data: &discordgo.InteractionResponseData{
+			Choices: choices,
+		},
+	})
 }
