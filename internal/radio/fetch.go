@@ -43,7 +43,7 @@ func getAvailableRadios() ([]Station, error) {
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			log.Fatalf("failed to close body getAvailableRadios: %w", err)
+			log.Println("failed to close body getAvailableRadios: %w", err)
 		}
 	}(resp.Body)
 
@@ -63,7 +63,7 @@ func getAvailableMirror() (string, error) {
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			log.Fatalf("failed to close body getAvailableMirror: %w", err)
+			log.Println("failed to close body getAvailableMirror: %w", err)
 		}
 	}(resp.Body)
 	var mirrors []Mirror
