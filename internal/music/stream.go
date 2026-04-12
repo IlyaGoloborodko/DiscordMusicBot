@@ -1,6 +1,7 @@
 package music
 
 import (
+	"fmt"
 	"log"
 	"os/exec"
 	"strings"
@@ -8,18 +9,33 @@ import (
 
 func GetStreamURL(id string) (string, error) {
 	cmd := exec.Command(
-		"yt-dlp",
+		ytDLPBinary(),
 		"--no-playlist",
 		"-f", "bestaudio",
 		"--print", "url",
+		"--no-warnings",
+		"--quiet",
 		"https://www.youtube.com/watch?v="+id,
 	)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("yt-dlp SEARCH ERROR: %v\nOUTPUT:\n%s", err, string(out))
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			log.Printf("yt-dlp STREAM ERROR: %v\nSTDERR:\n%s", err, string(exitErr.Stderr))
+		} else {
+			log.Printf("yt-dlp STREAM ERROR: %v", err)
+		}
 		return "", err
 	}
 
-	return strings.TrimSpace(string(out)), nil
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		url := strings.TrimSpace(line)
+		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+			return url, nil
+		}
+	}
+
+	log.Printf("yt-dlp STREAM ERROR: no valid URL in output: %q", string(out))
+	return "", fmt.Errorf("yt-dlp did not return a playable URL")
 }

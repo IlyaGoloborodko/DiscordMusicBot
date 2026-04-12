@@ -5,3 +5,8 @@ type Track struct {
 	ID       string `json:"id"`
 	Uploader string `json:"uploader"`
 }
+
+type searchVariant struct {
+	name string
+	args []string
+}

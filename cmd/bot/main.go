@@ -2,6 +2,7 @@ package main
 
 import (
 	"discordAudio/internal/discord"
+	"discordAudio/internal/music"
 	"discordAudio/internal/radio"
 	"log"
 	"os"
@@ -18,6 +19,8 @@ func init() {
 	if err := godotenv.Load(); err != nil {
 		log.Println(".env file not found, using system environment variables")
 	}
+
+	music.LogYTDLPVersion()
 
 	if err := radio.LoadAllStations(); err != nil {
 		log.Printf("failed to load station URLs: %v", err)

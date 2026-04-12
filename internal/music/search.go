@@ -2,37 +2,81 @@ package music
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/url"
 	"os/exec"
+	"strings"
 )
 
 func Search(query string) ([]Track, error) {
 
-	cmd := exec.Command(
-		"yt-dlp",
-		"ytsearch10:"+query,
-		"--flat-playlist",
-		"-J",
-	)
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []Track{}, nil
+	}
+
+	variants := []searchVariant{
+		{
+			name: "ytsearch pseudo-URL",
+			args: []string{"ytsearch10:" + query, "--flat-playlist", "-J", "--no-warnings"},
+		},
+		{
+			name: "youtube results URL",
+			args: []string{
+				"--flat-playlist",
+				"--playlist-end", "10",
+				"-J",
+				"https://www.youtube.com/results?search_query=" + url.QueryEscape(query),
+				"--no-warnings",
+			},
+		},
+	}
+
+	var lastErr error
+	for _, variant := range variants {
+		tracks, err := runSearchVariant(variant)
+		if err == nil {
+			return tracks, nil
+		}
+		lastErr = err
+		log.Printf("yt-dlp SEARCH variant failed (%s): %v", variant.name, err)
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("yt-dlp search failed")
+	}
+	return nil, lastErr
+}
+
+func runSearchVariant(variant searchVariant) ([]Track, error) {
+	cmd := exec.Command(ytDLPBinary(), variant.args...)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("yt-dlp SEARCH ERROR: %v\nOUTPUT:\n%s", err, string(out))
-		return nil, err
+		return nil, fmt.Errorf("%w; output: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	var result struct {
 		Entries []Track `json:"entries"`
 	}
 
-	err = json.Unmarshal(out, &result)
-	if err != nil {
-		return nil, err
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("json parse error: %w", err)
 	}
 
-	for i := range result.Entries {
-		result.Entries[i].Title = SafeName(result.Entries[i].Title)
+	tracks := make([]Track, 0, len(result.Entries))
+	for _, entry := range result.Entries {
+		if strings.TrimSpace(entry.ID) == "" || strings.TrimSpace(entry.Title) == "" {
+			continue
+		}
+		entry.Title = SafeName(entry.Title)
+		tracks = append(tracks, entry)
 	}
 
-	return result.Entries, nil
+	if len(tracks) == 0 {
+		return nil, fmt.Errorf("empty result set")
+	}
+
+	return tracks, nil
 }
