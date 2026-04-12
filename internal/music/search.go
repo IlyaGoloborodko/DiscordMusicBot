@@ -2,10 +2,12 @@ package music
 
 import (
 	"encoding/json"
+	"log"
 	"os/exec"
 )
 
 func Search(query string) ([]Track, error) {
+
 	cmd := exec.Command(
 		"yt-dlp",
 		"ytsearch10:"+query,
@@ -13,8 +15,9 @@ func Search(query string) ([]Track, error) {
 		"-J",
 	)
 
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
+		log.Printf("yt-dlp SEARCH ERROR: %v\nOUTPUT:\n%s", err, string(out))
 		return nil, err
 	}
 
@@ -25,6 +28,10 @@ func Search(query string) ([]Track, error) {
 	err = json.Unmarshal(out, &result)
 	if err != nil {
 		return nil, err
+	}
+
+	for i := range result.Entries {
+		result.Entries[i].Title = SafeName(result.Entries[i].Title)
 	}
 
 	return result.Entries, nil

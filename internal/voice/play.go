@@ -30,10 +30,9 @@ func PlayMusic(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 			})
 			return nil
 		}
-		time.Sleep(time.Second)
 	}
 
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(800 * time.Millisecond)
 
 	stream.StopChan()
 

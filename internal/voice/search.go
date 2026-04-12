@@ -53,19 +53,24 @@ func SearchRadio(s *discordgo.Session, i *discordgo.InteractionCreate, query str
 func SearchMusic(s *discordgo.Session, i *discordgo.InteractionCreate, query string) error {
 	tracks, err := music.Search(query)
 	if err != nil {
+		log.Printf("SearchMusic-Search error: %v", err)
 		return err
 	}
 
 	choices := make([]*discordgo.ApplicationCommandOptionChoice, 0, 10)
+
 	for _, t := range tracks {
 		name := t.Title
+
 		if t.Uploader != "" {
 			name = fmt.Sprintf("%s — %s", t.Title, t.Uploader)
 		}
 
+		name = music.SafeName(name)
+
 		choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
 			Name:  name,
-			Value: t.ID, // важно: сюда кладём ID видео, а не текст
+			Value: t.ID,
 		})
 
 		if len(choices) == 10 {

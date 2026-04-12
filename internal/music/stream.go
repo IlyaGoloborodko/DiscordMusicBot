@@ -1,6 +1,7 @@
 package music
 
 import (
+	"log"
 	"os/exec"
 	"strings"
 )
@@ -10,12 +11,13 @@ func GetStreamURL(id string) (string, error) {
 		"yt-dlp",
 		"--no-playlist",
 		"-f", "bestaudio",
-		"-g",
+		"--print", "url",
 		"https://www.youtube.com/watch?v="+id,
 	)
 
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
+		log.Printf("yt-dlp SEARCH ERROR: %v\nOUTPUT:\n%s", err, string(out))
 		return "", err
 	}
 

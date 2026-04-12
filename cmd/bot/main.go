@@ -15,16 +15,10 @@ import (
 )
 
 func init() {
-	//godotenv.Load()
-	//radioURL = os.Getenv("RADIO_URL")
-	//if radioURL == "" {
-	//	log.Fatal("RADIO_URL not set")
-	//}
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-		return
+	if err := godotenv.Load(); err != nil {
+		log.Println(".env file not found, using system environment variables")
 	}
+
 	if err := radio.LoadAllStations(); err != nil {
 		log.Printf("failed to load station URLs: %v", err)
 	} else {
