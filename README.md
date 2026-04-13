@@ -1,3 +1,5 @@
-For now its generated with AI:(
+.env:
 
-create .env and add DISCORD_TOKEN
+DISCORD_TOKEN=
+RADIO_URL=
+DEBUG_GUIID=
