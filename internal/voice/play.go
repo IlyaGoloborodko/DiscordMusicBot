@@ -55,7 +55,7 @@ func PlayMusic(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	}
 
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: fmt.Sprintf("🎧 Playing music: %s", ytVideoId),
+		Content: fmt.Sprintf("🎧 Бомбастик играет бит: %s", ytVideoId),
 	})
 	return err
 }
