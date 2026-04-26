@@ -2,7 +2,7 @@ package main
 
 import (
 	"discordAudio/internal/discord"
-	"discordAudio/internal/music"
+	"discordAudio/internal/logger"
 	"discordAudio/internal/radio"
 	"log"
 	"os"
@@ -15,12 +15,10 @@ import (
 	"github.com/joho/godotenv"
 )
 
-func init() {
+func initEnv() {
 	if err := godotenv.Load(); err != nil {
 		log.Println(".env file not found, using system environment variables")
 	}
-
-	music.LogYTDLPVersion()
 
 	if err := radio.LoadAllStations(); err != nil {
 		log.Printf("failed to load station URLs: %v", err)
@@ -29,7 +27,27 @@ func init() {
 	}
 }
 
+func loadLogger() {
+	tgCfg, err := logger.LoadTelegramConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	tgLogger, err := logger.NewTelegramLogger(tgCfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := tgLogger.Send("приложение запустилось"); err != nil {
+		log.Println("telegram send error:", err)
+	}
+}
+
 func main() {
+	wd, _ := os.Getwd()
+	log.Println("working dir:", wd)
+	initEnv()
+	loadLogger()
 	token := os.Getenv("DISCORD_TOKEN")
 	if token == "" {
 		log.Fatal("DISCORD_TOKEN not set")

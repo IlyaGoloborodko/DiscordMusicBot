@@ -1,10 +1,7 @@
 package music
 
 import (
-	"log"
 	"os"
-	"os/exec"
-	"strings"
 	"sync"
 )
 
@@ -24,13 +21,4 @@ func ytDLPBinary() string {
 		ytDLPBin = "yt-dlp"
 	})
 	return ytDLPBin
-}
-
-func LogYTDLPVersion() {
-	out, err := exec.Command(ytDLPBinary(), "--version").Output()
-	if err != nil {
-		log.Printf("yt-dlp version check failed: %v", err)
-		return
-	}
-	log.Printf("yt-dlp binary: %s, version: %s", ytDLPBinary(), strings.TrimSpace(string(out)))
 }
