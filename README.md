@@ -8,4 +8,5 @@ DEBUG_GUIID=
 
 # Logger
 TG_BOT_SECRET=
+
 TG_CHAT_ID=
