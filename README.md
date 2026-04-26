@@ -1,7 +1,9 @@
-.env:
+# .env:
 
 DISCORD_TOKEN=
+
 RADIO_URL=
+
 DEBUG_GUIID=
 
 # Logger

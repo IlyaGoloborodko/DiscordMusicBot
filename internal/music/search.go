@@ -1,6 +1,7 @@
 package music
 
 import (
+	"discordAudio/internal/logger"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -44,7 +45,7 @@ func Search(query string) ([]Track, error) {
 	}
 
 	if lastErr == nil {
-		lastErr = fmt.Errorf("yt-dlp search failed")
+		lastErr = logger.Send(fmt.Sprintf("yt-dlp search failed: %v", lastErr))
 	}
 	return nil, lastErr
 }

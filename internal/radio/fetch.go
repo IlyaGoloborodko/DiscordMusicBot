@@ -1,10 +1,10 @@
 package radio
 
 import (
+	"discordAudio/internal/logger"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 )
 
@@ -43,7 +43,7 @@ func getAvailableRadios() ([]Station, error) {
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			log.Println("failed to close body getAvailableRadios: %w", err)
+			logger.Send(fmt.Sprintf("failed to close body getAvailableRadios: %v", err))
 		}
 	}(resp.Body)
 
@@ -63,7 +63,7 @@ func getAvailableMirror() (string, error) {
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			log.Println("failed to close body getAvailableMirror: %w", err)
+			logger.Send(fmt.Sprintf("failed to close body getAvailableMirror: %v", err))
 		}
 	}(resp.Body)
 	var mirrors []Mirror

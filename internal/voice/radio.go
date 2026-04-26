@@ -2,9 +2,10 @@ package voice
 
 import (
 	"discordAudio/internal/discordUtils"
+	"discordAudio/internal/logger"
 	"discordAudio/internal/radio"
 	"discordAudio/internal/stream"
-	"log"
+	"fmt"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -58,13 +59,13 @@ func PlayRadio(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	// Запускаем стрим в отдельной горутине
 	go func() {
 		if err := stream.StartStreaming(vc, radioURL); err != nil {
-			log.Println("Error streaming:", err)
+			logger.Send(fmt.Sprintf("Error streaming: %v", err))
 		}
 	}()
 
 	// Включаем speaking
 	if err := vc.Speaking(true); err != nil {
-		log.Println("Error setting speaking:", err)
+		logger.Send(fmt.Sprintf("Error setting speaking: %v", err))
 	}
 
 	// Отправляем сообщение пользователю

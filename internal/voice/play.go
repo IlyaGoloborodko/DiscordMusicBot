@@ -2,10 +2,10 @@ package voice
 
 import (
 	"discordAudio/internal/discordUtils"
+	"discordAudio/internal/logger"
 	"discordAudio/internal/music"
 	"discordAudio/internal/stream"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -46,16 +46,16 @@ func PlayMusic(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 
 	go func() {
 		if err := stream.StartStreaming(vc, streamURL); err != nil {
-			log.Println("Error streaming music:", err)
+			logger.Send(fmt.Sprintf("Error streaming music: %v", err))
 		}
 	}()
 
 	if err := vc.Speaking(true); err != nil {
-		log.Println("Error setting speaking:", err)
+		logger.Send(fmt.Sprintf("Error setting speaking: %v", err))
 	}
 
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: fmt.Sprintf("🎧 Бомбастик играет бит: %s", ytVideoId),
+		Content: fmt.Sprintf("🎧 Играем: %s", ytVideoId),
 	})
 	return err
 }

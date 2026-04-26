@@ -2,6 +2,8 @@ package logger
 
 import (
 	"errors"
+	"log"
+	"sync"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -35,4 +37,22 @@ func (l *TelegramLogger) Send(text string) error {
 	msg := tgbotapi.NewMessage(l.chatID, text)
 	_, err := l.bot.Send(msg)
 	return err
+}
+
+var (
+	tg   *TelegramLogger
+	once sync.Once
+)
+
+func Init(l *TelegramLogger) {
+	once.Do(func() {
+		tg = l
+	})
+}
+
+func Send(text string) error {
+	if tg == nil {
+		log.Printf("failed to send telegram message")
+	}
+	return tg.Send(text)
 }

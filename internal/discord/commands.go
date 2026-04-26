@@ -2,9 +2,9 @@ package discord
 
 import (
 	"discordAudio/internal/config"
+	"discordAudio/internal/logger"
 	"discordAudio/internal/voice"
 	"fmt"
-	"log"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -47,19 +47,19 @@ var (
 		"play": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			err := voice.PlayMusic(s, i)
 			if err != nil {
-				log.Fatal("error processing Play command,", err)
+				logger.Send(fmt.Sprintf("error processing Play command: %v", err))
 			}
 		},
 		"radio": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			err := voice.PlayRadio(s, i)
 			if err != nil {
-				log.Fatal("error processing Play command,", err)
+				logger.Send(fmt.Sprintf("error processing Play command: %v", err))
 			}
 		},
 		"stop": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			err := voice.StopRadio(s, i)
 			if err != nil {
-				log.Fatal("error processing Stop command,", err)
+				logger.Send(fmt.Sprintf("error processing Stop command: %v", err))
 			}
 		},
 	}
@@ -78,7 +78,7 @@ func RegisterCommands(s *discordgo.Session) error {
 	for i, v := range commands {
 		cmd, err := s.ApplicationCommandCreate(s.State.User.ID, serverGuiid, v)
 		if err != nil {
-			log.Panicf("Cannot create '%v' command: %v", v.Name, err)
+			logger.Send(fmt.Sprintf("Cannot create '%v' command: %v", v.Name, err))
 		}
 		RegisteredCommands[i] = cmd
 	}
@@ -89,7 +89,7 @@ func RegisterCommands(s *discordgo.Session) error {
 			}
 			err := s.ApplicationCommandDelete(s.State.User.ID, serverGuiid, v.ID)
 			if err != nil {
-				log.Panicf("Cannot delete '%v' command: %v", v.Name, err)
+				logger.Send(fmt.Sprintf("Cannot delete '%v' command: %v", v.Name, err))
 			}
 		}
 	}

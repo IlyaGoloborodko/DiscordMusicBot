@@ -1,10 +1,10 @@
 package voice
 
 import (
+	"discordAudio/internal/logger"
 	"discordAudio/internal/music"
 	"discordAudio/internal/radio"
 	"fmt"
-	"log"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -53,7 +53,7 @@ func SearchRadio(s *discordgo.Session, i *discordgo.InteractionCreate, query str
 func SearchMusic(s *discordgo.Session, i *discordgo.InteractionCreate, query string) error {
 	tracks, err := music.Search(query)
 	if err != nil {
-		log.Printf("SearchMusic-Search error: %v", err)
+		logger.Send(fmt.Sprintf("SearchMusic-Search error: %v", err))
 		return err
 	}
 
@@ -78,7 +78,7 @@ func SearchMusic(s *discordgo.Session, i *discordgo.InteractionCreate, query str
 		}
 	}
 
-	log.Println("music autocomplete:", query, "results:", len(choices))
+	//logger.Send(fmt.Sprintf("music autocomplete:", query, "results:", len(choices)))
 
 	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionApplicationCommandAutocompleteResult,

@@ -38,9 +38,7 @@ func loadLogger() {
 		log.Fatal(err)
 	}
 
-	if err := tgLogger.Send("приложение запустилось"); err != nil {
-		log.Println("telegram send error:", err)
-	}
+	logger.Init(tgLogger)
 }
 
 func main() {
@@ -73,6 +71,7 @@ func main() {
 	if err != nil {
 		log.Fatal("error register Discord commands,", err)
 	}
+	logger.Send("Bot is up!")
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

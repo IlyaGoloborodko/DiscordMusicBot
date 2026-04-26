@@ -1,8 +1,8 @@
 package music
 
 import (
+	"discordAudio/internal/logger"
 	"fmt"
-	"log"
 	"os/exec"
 	"strings"
 )
@@ -21,9 +21,9 @@ func GetStreamURL(id string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			log.Printf("yt-dlp STREAM ERROR: %v\nSTDERR:\n%s", err, string(exitErr.Stderr))
+			logger.Send(fmt.Sprintf("yt-dlp STREAM ERROR: %v\nSTDERR:\n%s", err, string(exitErr.Stderr)))
 		} else {
-			log.Printf("yt-dlp STREAM ERROR: %v", err)
+			logger.Send(fmt.Sprintf("yt-dlp STREAM ERROR: %v", err))
 		}
 		return "", err
 	}
@@ -36,6 +36,6 @@ func GetStreamURL(id string) (string, error) {
 		}
 	}
 
-	log.Printf("yt-dlp STREAM ERROR: no valid URL in output: %q", string(out))
+	logger.Send(fmt.Sprintf("yt-dlp STREAM ERROR: no valid URL in output: %q", string(out)))
 	return "", fmt.Errorf("yt-dlp did not return a playable URL")
 }
