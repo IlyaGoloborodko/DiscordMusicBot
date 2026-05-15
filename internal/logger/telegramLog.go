@@ -1,19 +1,22 @@
 package logger
 
 import (
+	"context"
 	"errors"
-	"log"
 	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 type TelegramLogger struct {
-	bot    *tgbotapi.BotAPI
-	chatID int64
+	bot         *tgbotapi.BotAPI
+	chatID      int64
+	redisClient *redis.Client
 }
 
-func NewTelegramLogger(cfg *TelegramConfig) (*TelegramLogger, error) {
+func NewTelegramLogger(cfg *TelegramConfig, rdb *redis.Client) (*TelegramLogger, error) {
 	if cfg == nil {
 		return nil, errors.New("nil telegram config")
 	}
@@ -24,19 +27,17 @@ func NewTelegramLogger(cfg *TelegramConfig) (*TelegramLogger, error) {
 	}
 
 	return &TelegramLogger{
-		bot:    bot,
-		chatID: cfg.ChatID,
+		bot:         bot,
+		chatID:      cfg.ChatID,
+		redisClient: rdb,
 	}, nil
 }
 
-func (l *TelegramLogger) Send(text string) error {
+func (l *TelegramLogger) Send(ctx context.Context, text string) error {
 	if l == nil || l.bot == nil {
 		return errors.New("telegram logger is not initialized")
 	}
-
-	msg := tgbotapi.NewMessage(l.chatID, text)
-	_, err := l.bot.Send(msg)
-	return err
+	return l.redisClient.LPush(ctx, "tg_logs", text).Err()
 }
 
 var (
@@ -44,15 +45,23 @@ var (
 	once sync.Once
 )
 
-func Init(l *TelegramLogger) {
+func Init(ctx context.Context, l *TelegramLogger) {
+	if l == nil {
+		return
+	}
+
 	once.Do(func() {
 		tg = l
+		go tg.StartWorker(ctx)
 	})
 }
 
 func Send(text string) error {
 	if tg == nil {
-		log.Printf("failed to send telegram message")
+		return errors.New("telegram logger is not initialized")
 	}
-	return tg.Send(text)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	return tg.Send(ctx, text)
 }
