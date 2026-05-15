@@ -6,6 +6,7 @@ import (
 	"discordAudio/internal/logger"
 	"discordAudio/internal/radio"
 	"discordAudio/internal/storage"
+	"discordAudio/internal/voice"
 	"log"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 )
 
 func initEnv() {
@@ -29,16 +31,10 @@ func initEnv() {
 	}
 }
 
-func loadLogger(ctx context.Context) {
+func loadLogger(ctx context.Context, rdb *redis.Client) {
 	tgCfg, err := logger.LoadTelegramConfig()
 	if err != nil {
 		log.Fatal(err)
-	}
-
-	redisStorage := storage.DefaultRedisConfig()
-	rdb, err := storage.NewClient(context.Background(), redisStorage)
-	if err != nil {
-		log.Fatalf("failed to connect to redis server: %v", err)
 	}
 
 	tgLogger, err := logger.NewTelegramLogger(tgCfg, rdb)
@@ -56,8 +52,17 @@ func main() {
 	wd, _ := os.Getwd()
 	log.Println("working dir:", wd)
 
+	redisStorage := storage.DefaultRedisConfig()
+	rdb, err := storage.NewClient(context.Background(), redisStorage)
+	if err != nil {
+		log.Fatalf("failed to connect to redis server: %v", err)
+	}
+
 	initEnv()
-	loadLogger(ctx)
+	loadLogger(ctx, rdb)
+
+	trackCache := voice.NewTrackCache(rdb)
+	voice.InitTrackCache(trackCache)
 
 	token := os.Getenv("DISCORD_TOKEN")
 	if token == "" {

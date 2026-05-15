@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"context"
 	"discordAudio/internal/discordUtils"
 	"discordAudio/internal/logger"
 	"discordAudio/internal/music"
@@ -13,6 +14,11 @@ import (
 
 func PlayMusic(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	ytVideoId := i.ApplicationCommandData().Options[0].StringValue()
+
+	track, cacheErr := trackCache.Get(context.Background(), ytVideoId)
+	if cacheErr != nil {
+		logger.Send("Error on music playing: " + cacheErr.Error())
+	}
 
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
@@ -50,12 +56,14 @@ func PlayMusic(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 		}
 	}()
 
-	if err := vc.Speaking(true); err != nil {
-		logger.Send(fmt.Sprintf("Error setting speaking: %v", err))
+	if cacheErr == nil {
+		_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("🎧 Играем: %s — %s", track.Title, track.Uploader),
+		})
+	} else {
+		_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("🎧 Играем: %s", ytVideoId),
+		})
 	}
-
-	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: fmt.Sprintf("🎧 Играем: %s", ytVideoId),
-	})
 	return err
 }

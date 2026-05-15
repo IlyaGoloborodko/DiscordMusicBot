@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"context"
 	"discordAudio/internal/logger"
 	"discordAudio/internal/music"
 	"discordAudio/internal/radio"
@@ -68,6 +69,15 @@ func SearchMusic(s *discordgo.Session, i *discordgo.InteractionCreate, query str
 
 		name = music.SafeName(name)
 
+		if trackCache != nil {
+			_ = trackCache.Save(
+				context.Background(),
+				t.ID,
+				t.Title,
+				t.Uploader,
+			)
+		}
+
 		choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
 			Name:  name,
 			Value: t.ID,
@@ -77,8 +87,6 @@ func SearchMusic(s *discordgo.Session, i *discordgo.InteractionCreate, query str
 			break
 		}
 	}
-
-	//logger.Send(fmt.Sprintf("music autocomplete:", query, "results:", len(choices)))
 
 	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
