@@ -58,7 +58,10 @@ func runSearchVariant(variant searchVariant) ([]Track, error) {
 		return nil, fmt.Errorf("%w; output: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	logger.Send(fmt.Sprintf("yt-dlp RAW (%s): %s", variant.name, string(out)))
+	err = logger.Send(fmt.Sprintf("yt-dlp RAW (%s): %s", variant.name, string(out)))
+	if err != nil {
+		fmt.Printf("yt-dlp RAW (%s) failed: %s", variant.name, err)
+	}
 
 	var result struct {
 		Entries []Track `json:"entries"`
