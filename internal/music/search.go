@@ -58,6 +58,8 @@ func runSearchVariant(variant searchVariant) ([]Track, error) {
 		return nil, fmt.Errorf("%w; output: %s", err, strings.TrimSpace(string(out)))
 	}
 
+	logger.Send(fmt.Sprintf("yt-dlp RAW (%s): %s", variant.name, string(out)))
+
 	var result struct {
 		Entries []Track `json:"entries"`
 	}
