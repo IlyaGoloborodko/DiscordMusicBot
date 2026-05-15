@@ -58,11 +58,6 @@ func runSearchVariant(variant searchVariant) ([]Track, error) {
 		return nil, fmt.Errorf("%w; output: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	err = logger.Send(fmt.Sprintf("yt-dlp RAW (%s): %s", variant.name, string(out)))
-	if err != nil {
-		logger.Send(fmt.Sprintf("yt-dlp RAW (%s) failed: %v", variant.name, err))
-	}
-
 	var result struct {
 		Entries []Track `json:"entries"`
 	}
@@ -75,6 +70,9 @@ func runSearchVariant(variant searchVariant) ([]Track, error) {
 	for _, entry := range result.Entries {
 		if strings.TrimSpace(entry.ID) == "" || strings.TrimSpace(entry.Title) == "" {
 			continue
+		}
+		if strings.TrimSpace(entry.URL) == "" {
+			entry.URL = "https://www.youtube.com/watch?v=" + entry.ID
 		}
 		entry.Title = SafeName(entry.Title)
 		tracks = append(tracks, entry)
