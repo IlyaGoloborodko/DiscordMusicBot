@@ -25,7 +25,7 @@ func Search(query string) ([]Track, error) {
 		{
 			name: "youtube results URL",
 			args: []string{
-				"--flat-playlist",
+				//"--flat-playlist",
 				"--playlist-end", "10",
 				"-J",
 				"https://www.youtube.com/results?search_query=" + url.QueryEscape(query),

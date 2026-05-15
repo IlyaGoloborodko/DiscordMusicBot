@@ -75,6 +75,7 @@ func SearchMusic(s *discordgo.Session, i *discordgo.InteractionCreate, query str
 				t.ID,
 				t.Title,
 				t.Uploader,
+				t.URL,
 			)
 		}
 

@@ -58,7 +58,7 @@ func PlayMusic(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 
 	if cacheErr == nil {
 		_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Content: fmt.Sprintf("🎧 Играем: %s — %s", track.Title, track.Uploader),
+			Content: fmt.Sprintf("🎧 Играем: [%s](%s) — %s", track.Title, track.Url, track.Uploader),
 		})
 	} else {
 		_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{

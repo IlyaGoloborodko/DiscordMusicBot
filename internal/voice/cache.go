@@ -19,6 +19,7 @@ func NewTrackCache(rdb *redis.Client) *TrackCache {
 type TrackInfo struct {
 	Title    string
 	Uploader string
+	Url      string
 }
 
 var trackCache *TrackCache
@@ -31,10 +32,11 @@ func InitTrackCache(c *TrackCache) {
 	trackCache = c
 }
 
-func (c *TrackCache) Save(ctx context.Context, id string, title string, uploader string) error {
+func (c *TrackCache) Save(ctx context.Context, id string, title string, uploader string, url string) error {
 	data, _ := json.Marshal(TrackInfo{
 		Title:    title,
 		Uploader: uploader,
+		Url:      url,
 	})
 
 	return c.rdb.Set(ctx, "track_"+id, data, time.Minute*10).Err()
