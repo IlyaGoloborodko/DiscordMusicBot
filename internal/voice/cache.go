@@ -37,7 +37,7 @@ func (c *TrackCache) Save(ctx context.Context, id string, title string, uploader
 		Uploader: uploader,
 	})
 
-	return c.rdb.Set(ctx, "track_"+id, data, time.Hour).Err()
+	return c.rdb.Set(ctx, "track_"+id, data, time.Minute*10).Err()
 }
 
 func (c *TrackCache) Get(ctx context.Context, id string) (TrackInfo, error) {
