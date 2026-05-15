@@ -8,7 +8,6 @@ DEBUG_GUIID=
 
 REDIS_ADDR=
 
-# Logger
 TG_BOT_SECRET=
 
 TG_CHAT_ID=
