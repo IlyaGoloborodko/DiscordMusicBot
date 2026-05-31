@@ -114,19 +114,44 @@ func RegisterCommands(s *discordgo.Session) error {
 	}
 	s.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		// Запускаем обработку каждой команды в отдельной горутине
-		go func() {
-			switch i.Type {
-			case discordgo.InteractionApplicationCommandAutocomplete:
+		switch i.Type {
+		case discordgo.InteractionApplicationCommandAutocomplete:
+			go func() {
 				if err := voice.Search(s, i, i.ApplicationCommandData().Name); err != nil {
 					fmt.Println(err)
 				}
-			case discordgo.InteractionApplicationCommand:
-				if h, ok := commandHandlers[i.ApplicationCommandData().Name]; ok {
-					h(s, i)
+			}()
+		case discordgo.InteractionApplicationCommand:
+			cmdName := i.ApplicationCommandData().Name
+			h, ok := commandHandlers[cmdName]
+			if !ok {
+				return
+			}
+
+			if commandNeedsDeferredResponse(cmdName) {
+				if err := deferInteractionResponse(s, i); err != nil {
+					logger.Send(fmt.Sprintf("error deferring %s command: %v", cmdName, err))
+					return
 				}
 			}
-		}()
+			go h(s, i)
+		}
 	})
 
 	return nil
+}
+
+func commandNeedsDeferredResponse(name string) bool {
+	switch name {
+	case "play", "prompt", "radio":
+		return true
+	default:
+		return false
+	}
+}
+
+func deferInteractionResponse(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
 }

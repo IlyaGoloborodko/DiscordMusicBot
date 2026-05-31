@@ -20,17 +20,11 @@ func PlayMusic(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 		logger.Send("Error on music playing: " + cacheErr.Error())
 	}
 
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	})
-	if err != nil {
-		return err
-	}
-
+	var err error
 	vc, found := discordUtils.FindVoiceConnection(s, i.GuildID)
 	if !found || vc == nil {
 		vc, err = JoinVoice(s, i)
-		if err != nil {
+		if err != nil || vc == nil {
 			_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 				Content: "Сначала зайди в голосовой канал!",
 			})

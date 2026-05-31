@@ -15,7 +15,7 @@ type Client struct {
 }
 
 type PromptRequest struct {
-	Message string `json:"message"`
+	Message string `json:"user_message"`
 }
 
 type PromptResponse struct {
