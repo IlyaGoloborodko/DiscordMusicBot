@@ -43,7 +43,7 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	}
 
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: "🔊",
+		Content: "Ответ",
 	})
 	if err != nil {
 		cancel()
@@ -55,7 +55,7 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 		defer cancel()
 		defer audioStream.Close()
 
-		if err := stream.StartStreamingReader(vc, audioStream); err != nil {
+		if err := stream.StartStreamingPCMReader(vc, audioStream, 22050, 1); err != nil {
 			logger.Send(fmt.Sprintf("AI stream error: %v", err))
 		}
 	}()

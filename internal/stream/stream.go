@@ -1,10 +1,14 @@
 package stream
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
 	"os/exec"
+	"strconv"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"layeh.com/gopus"
@@ -37,6 +41,22 @@ func StartStreamingReader(vc *discordgo.VoiceConnection, audio io.Reader) error 
 	return startFFmpegStreaming(vc, cmd)
 }
 
+func StartStreamingPCMReader(vc *discordgo.VoiceConnection, audio io.Reader, sampleRate int, channels int) error {
+	cmd := exec.Command("ffmpeg",
+		"-f", "s16le",
+		"-ar", strconv.Itoa(sampleRate),
+		"-ac", strconv.Itoa(channels),
+		"-i", "pipe:0",
+		"-f", "s16le",
+		"-ar", "48000",
+		"-ac", "2",
+		"pipe:1",
+	)
+	cmd.Stdin = audio
+
+	return startFFmpegStreaming(vc, cmd)
+}
+
 func startFFmpegStreaming(vc *discordgo.VoiceConnection, cmd *exec.Cmd) error {
 	stopChan := StopChan()
 
@@ -49,16 +69,19 @@ func startFFmpegStreaming(vc *discordgo.VoiceConnection, cmd *exec.Cmd) error {
 		return err
 	}
 
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
 	enc, err := gopus.NewEncoder(48000, 2, gopus.Audio)
 	if err != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = waitFFmpeg(cmd, &stderr)
 		return err
 	}
 
 	if err := vc.Speaking(true); err != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = waitFFmpeg(cmd, &stderr)
 		return err
 	}
 
@@ -72,7 +95,7 @@ func startFFmpegStreaming(vc *discordgo.VoiceConnection, cmd *exec.Cmd) error {
 		case <-stopChan:
 			// получили сигнал остановки — завершаем цикл
 			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			_ = waitFFmpeg(cmd, &stderr)
 			return nil
 		default:
 			// читаем PCM и отправляем в Discord
@@ -80,8 +103,7 @@ func startFFmpegStreaming(vc *discordgo.VoiceConnection, cmd *exec.Cmd) error {
 				if err != io.EOF {
 					log.Println("PCM read error:", err)
 				}
-				err := cmd.Wait()
-				if err != nil {
+				if err := waitFFmpeg(cmd, &stderr); err != nil {
 					return err
 				}
 				return nil
@@ -93,4 +115,15 @@ func startFFmpegStreaming(vc *discordgo.VoiceConnection, cmd *exec.Cmd) error {
 			vc.OpusSend <- opusFrame
 		}
 	}
+}
+
+func waitFFmpeg(cmd *exec.Cmd, stderr *bytes.Buffer) error {
+	if err := cmd.Wait(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message != "" {
+			return fmt.Errorf("ffmpeg exited: %w; stderr: %s", err, message)
+		}
+		return fmt.Errorf("ffmpeg exited: %w", err)
+	}
+	return nil
 }
