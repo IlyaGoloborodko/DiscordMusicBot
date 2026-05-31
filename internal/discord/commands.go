@@ -25,6 +25,18 @@ var (
 			},
 		},
 		{
+			Name:        "prompt",
+			Description: "say something to AI",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Name:        "query",
+					Description: "Type something",
+					Type:        discordgo.ApplicationCommandOptionString,
+					Required:    true,
+				},
+			},
+		},
+		{
 			Name:        "radio",
 			Description: "play Radio",
 			Options: []*discordgo.ApplicationCommandOption{
@@ -50,10 +62,17 @@ var (
 				logger.Send(fmt.Sprintf("error processing Play command: %v", err))
 			}
 		},
+		"prompt": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+			err := voice.GetAiResponse(s, i)
+			if err != nil {
+				logger.Send(fmt.Sprintf("error processing Prompt command: %v", err))
+			}
+		},
+		// TODO remove radio
 		"radio": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			err := voice.PlayRadio(s, i)
 			if err != nil {
-				logger.Send(fmt.Sprintf("error processing Play command: %v", err))
+				logger.Send(fmt.Sprintf("error processing Radio command: %v", err))
 			}
 		},
 		"stop": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
