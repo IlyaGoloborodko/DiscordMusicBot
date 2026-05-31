@@ -49,6 +49,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	initEnv()
 	wd, _ := os.Getwd()
 	log.Println("working dir:", wd)
 
@@ -58,7 +59,6 @@ func main() {
 		log.Fatalf("failed to connect to redis server: %v", err)
 	}
 
-	initEnv()
 	loadLogger(ctx, rdb)
 
 	trackCache := voice.NewTrackCache(rdb)
