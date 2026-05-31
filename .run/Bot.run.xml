@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Bot" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="discordAudio" />
+    <working_directory value="$PROJECT_DIR$" />
+    <kind value="PACKAGE" />
+    <package value="discordAudio/cmd/bot" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$" />
+    <method v="2">
+      <option name="RunConfigurationTask" enabled="true" run_configuration_name="docker redis local" run_configuration_type="docker-deploy" />
+    </method>
+  </configuration>
+</component>
