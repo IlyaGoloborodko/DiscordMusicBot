@@ -4,12 +4,15 @@ import (
 	"context"
 	"discordAudio/internal/aiService"
 	"discordAudio/internal/discordUtils"
+	"discordAudio/internal/logger"
 	"discordAudio/internal/stream"
+	"fmt"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
 
-func GetAiResponse(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	userMessage := i.ApplicationCommandData().Options[0].StringValue()
 
 	var err error
@@ -25,23 +28,37 @@ func GetAiResponse(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 		}
 	}
 
-	stream.StopChan()
+	stream.StopCurrentStream()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	ai := aiService.NewClient()
 
-	_, err = ai.Prompt(context.Background(), userMessage)
+	audioStream, err := ai.Prompt(ctx, userMessage)
 	if err != nil {
+		cancel()
+		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: "Не удалось получить аудиопоток от AI.",
+		})
 		return err
 	}
-	//audioStream, err := tts.Synthesize(text)
-	//if err != nil {
-	//	return err
-	//}
-	//
-	//go func() {
-	//	if err := stream.StartStreaming(vc, audioStream); err != nil {
-	//		logger.Send(fmt.Sprintf("stream error: %v", err))
-	//	}
-	//}()
-	return err
+
+	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: "🔊",
+	})
+	if err != nil {
+		cancel()
+		_ = audioStream.Close()
+		return err
+	}
+
+	go func() {
+		defer cancel()
+		defer audioStream.Close()
+
+		if err := stream.StartStreamingReader(vc, audioStream); err != nil {
+			logger.Send(fmt.Sprintf("AI stream error: %v", err))
+		}
+	}()
+
+	return nil
 }

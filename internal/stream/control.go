@@ -1,16 +1,24 @@
 package stream
 
-var stopStreamChan = make(chan struct{}, 1)
+import "sync"
+
+var (
+	stopStreamMu   sync.Mutex
+	stopStreamChan = make(chan struct{})
+)
 
 // Остановить текущий поток (без блокировки)
 func StopCurrentStream() {
-	select {
-	case stopStreamChan <- struct{}{}:
-	default:
-	}
+	stopStreamMu.Lock()
+	defer stopStreamMu.Unlock()
+
+	close(stopStreamChan)
+	stopStreamChan = make(chan struct{})
 }
 
 // Вернуть канал для StreamRadio
 func StopChan() <-chan struct{} {
+	stopStreamMu.Lock()
+	defer stopStreamMu.Unlock()
 	return stopStreamChan
 }

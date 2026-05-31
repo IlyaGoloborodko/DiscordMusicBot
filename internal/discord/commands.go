@@ -63,7 +63,7 @@ var (
 			}
 		},
 		"prompt": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-			err := voice.GetAiResponse(s, i)
+			err := voice.ProcessPrompt(s, i)
 			if err != nil {
 				logger.Send(fmt.Sprintf("error processing Prompt command: %v", err))
 			}

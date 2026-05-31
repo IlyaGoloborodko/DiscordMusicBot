@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 )
@@ -18,21 +20,18 @@ type PromptRequest struct {
 	Message string `json:"user_message"`
 }
 
-type PromptResponse struct {
-	Output string `json:"output"`
-}
-
 func NewClient() *Client {
 	return &Client{
 		baseURL: os.Getenv("AI_SERVICE_ADDR"),
 		apiKey:  os.Getenv("AI_SERVICE_API_KEY"),
-		http: &http.Client{
-			Timeout: 0,
-		},
+		http:    &http.Client{},
 	}
 }
 
-func (c *Client) Prompt(ctx context.Context, message string) (string, error) {
+func (c *Client) Prompt(ctx context.Context, message string) (io.ReadCloser, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("AI_SERVICE_ADDR is not set")
+	}
 
 	reqBody := PromptRequest{
 		Message: message,
@@ -40,9 +39,8 @@ func (c *Client) Prompt(ctx context.Context, message string) (string, error) {
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
 	req, err := http.NewRequestWithContext(
 		ctx,
 		"POST",
@@ -50,7 +48,7 @@ func (c *Client) Prompt(ctx context.Context, message string) (string, error) {
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -61,14 +59,14 @@ func (c *Client) Prompt(ctx context.Context, message string) (string, error) {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	var result PromptResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return result.Output, nil
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("AI service returned %s: %s", resp.Status, string(body))
+	}
+
+	return resp.Body, nil
 }

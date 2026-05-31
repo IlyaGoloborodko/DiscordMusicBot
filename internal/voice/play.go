@@ -34,7 +34,7 @@ func PlayMusic(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 
 	time.Sleep(800 * time.Millisecond)
 
-	stream.StopChan()
+	stream.StopCurrentStream()
 
 	streamURL, err := music.GetStreamURL(ytVideoId)
 	if err != nil {
