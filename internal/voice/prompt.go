@@ -33,11 +33,20 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	ai := aiService.NewClient()
 
-	audioStream, err := ai.Prompt(ctx, userMessage)
+	aiTextResponse, err := ai.Prompt(ctx, userMessage)
 	if err != nil {
 		cancel()
 		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Content: "Не удалось получить аудиопоток от AI.",
+			Content: "Ошибочка.",
+		})
+		return err
+	}
+
+	audioStream, err := ai.Tts(ctx, aiTextResponse.FullAnswerForTTS)
+	if err != nil {
+		cancel()
+		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: "Ошибочка",
 		})
 		return err
 	}
@@ -59,6 +68,8 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 			logger.Send(fmt.Sprintf("AI stream error: %v", err))
 		}
 	}()
+
+	//tracks, err := music.Search("У пилота ")
 
 	return nil
 }

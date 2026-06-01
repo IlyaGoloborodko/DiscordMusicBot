@@ -28,7 +28,7 @@ func NewClient() *Client {
 	}
 }
 
-func (c *Client) Prompt(ctx context.Context, message string) (io.ReadCloser, error) {
+func (c *Client) Prompt(ctx context.Context, message string) (*AgentOutput, error) {
 	if c.baseURL == "" {
 		return nil, fmt.Errorf("AI_SERVICE_ADDR is not set")
 	}
@@ -45,6 +45,58 @@ func (c *Client) Prompt(ctx context.Context, message string) (io.ReadCloser, err
 		ctx,
 		"POST",
 		c.baseURL+"/prompt",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("AI service returned %s: %s", resp.Status, string(body))
+	}
+	var result AgentOutput
+
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+type TtsRequest struct {
+	Text string `json:"text"`
+}
+
+func (c *Client) Tts(ctx context.Context, text string) (io.ReadCloser, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("AI_SERVICE_ADDR is not set")
+	}
+
+	reqBody := TtsRequest{
+		Text: text,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		c.baseURL+"/tts",
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
