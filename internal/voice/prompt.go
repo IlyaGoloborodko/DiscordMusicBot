@@ -53,7 +53,7 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	}
 
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: "Ответ",
+		Content: aiTextResponse.FullAnswerForTTS,
 	})
 	if err != nil {
 		cancel()
