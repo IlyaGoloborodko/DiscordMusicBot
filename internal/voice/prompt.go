@@ -61,6 +61,11 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 		return err
 	}
 
+	musicResultChan := make(chan promptMusicResult, 1)
+	go func() {
+		musicResultChan <- findPromptMusic(userMessage)
+	}()
+
 	go func() {
 		defer cancel()
 		defer audioStream.Close()
@@ -69,33 +74,46 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 			logger.Send(fmt.Sprintf("AI stream error: %v", err))
 			return
 		}
-		tracks, err := music.Search(aiTextResponse.SearchStringForMusic)
-		if err != nil {
-			logger.Send(fmt.Sprintf("AI music search error: %v", err))
-			return
-		}
-		if len(tracks) == 0 {
-			logger.Send(fmt.Sprintf("AI music search returned no tracks for query: %s", aiTextResponse.SearchStringForMusic))
-			return
-		}
-
-		track := tracks[0]
-		streamURL, err := music.GetStreamURL(track.ID)
-		if err != nil {
-			logger.Send(fmt.Sprintf("AI music stream URL error: %v", err))
+		musicResult := <-musicResultChan
+		if musicResult.err != nil {
+			logger.Send(fmt.Sprintf("AI music search error: %v", musicResult.err))
 			return
 		}
 
 		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Content: fmt.Sprintf("🎧 Играем: [%s](%s) — %s", track.Title, track.URL, track.Uploader),
+			Content: fmt.Sprintf("🎧 Играем: [%s](%s) — %s", musicResult.track.Title, musicResult.track.URL, musicResult.track.Uploader),
 		})
 
-		if err := stream.StartStreaming(vc, streamURL); err != nil {
+		if err := stream.StartStreaming(vc, musicResult.streamURL); err != nil {
 			logger.Send(fmt.Sprintf("AI music stream error: %v", err))
 		}
 	}()
-
-	//tracks, err := music.Search("У пилота ")
-
 	return nil
+}
+
+type promptMusicResult struct {
+	track     music.Track
+	streamURL string
+	err       error
+}
+
+func findPromptMusic(query string) promptMusicResult {
+	tracks, err := music.Search(query)
+	if err != nil {
+		return promptMusicResult{err: err}
+	}
+	if len(tracks) == 0 {
+		return promptMusicResult{err: fmt.Errorf("no tracks found for query: %s", query)}
+	}
+
+	track := tracks[0]
+	streamURL, err := music.GetStreamURL(track.ID)
+	if err != nil {
+		return promptMusicResult{err: err}
+	}
+
+	return promptMusicResult{
+		track:     track,
+		streamURL: streamURL,
+	}
 }
