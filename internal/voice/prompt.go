@@ -63,7 +63,7 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 
 	musicResultChan := make(chan promptMusicResult, 1)
 	go func() {
-		musicResultChan <- findPromptMusic(userMessage)
+		musicResultChan <- findPromptMusic(aiTextResponse.SearchStringForMusic)
 	}()
 
 	go func() {
