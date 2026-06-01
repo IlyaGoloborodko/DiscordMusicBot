@@ -5,6 +5,7 @@ import (
 	"discordAudio/internal/aiService"
 	"discordAudio/internal/discordUtils"
 	"discordAudio/internal/logger"
+	"discordAudio/internal/music"
 	"discordAudio/internal/stream"
 	"fmt"
 	"time"
@@ -66,6 +67,31 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 
 		if err := stream.StartStreamingPCMReader(vc, audioStream, 22050, 1); err != nil {
 			logger.Send(fmt.Sprintf("AI stream error: %v", err))
+			return
+		}
+		tracks, err := music.Search(aiTextResponse.SearchStringForMusic)
+		if err != nil {
+			logger.Send(fmt.Sprintf("AI music search error: %v", err))
+			return
+		}
+		if len(tracks) == 0 {
+			logger.Send(fmt.Sprintf("AI music search returned no tracks for query: %s", aiTextResponse.SearchStringForMusic))
+			return
+		}
+
+		track := tracks[0]
+		streamURL, err := music.GetStreamURL(track.ID)
+		if err != nil {
+			logger.Send(fmt.Sprintf("AI music stream URL error: %v", err))
+			return
+		}
+
+		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: fmt.Sprintf("🎧 Играем: [%s](%s) — %s", track.Title, track.URL, track.Uploader),
+		})
+
+		if err := stream.StartStreaming(vc, streamURL); err != nil {
+			logger.Send(fmt.Sprintf("AI music stream error: %v", err))
 		}
 	}()
 
