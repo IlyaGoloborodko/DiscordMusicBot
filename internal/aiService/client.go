@@ -61,6 +61,7 @@ func (c *Client) Prompt(ctx context.Context, message string) (*AgentOutput, erro
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
