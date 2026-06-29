@@ -16,7 +16,7 @@ func StopCurrentStream() {
 	stopStreamChan = make(chan struct{})
 }
 
-// Вернуть канал для StreamRadio
+// Вернуть канал остановки текущего потока
 func StopChan() <-chan struct{} {
 	stopStreamMu.Lock()
 	defer stopStreamMu.Unlock()

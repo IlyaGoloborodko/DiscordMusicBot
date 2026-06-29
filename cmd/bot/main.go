@@ -4,7 +4,6 @@ import (
 	"context"
 	"discordAudio/internal/discord"
 	"discordAudio/internal/logger"
-	"discordAudio/internal/radio"
 	"discordAudio/internal/storage"
 	"discordAudio/internal/voice"
 	"log"
@@ -22,12 +21,6 @@ import (
 func initEnv() {
 	if err := godotenv.Load(); err != nil {
 		log.Println(".env file not found, using system environment variables")
-	}
-
-	if err := radio.LoadAllStations(); err != nil {
-		log.Printf("failed to load station URLs: %v", err)
-	} else {
-		log.Printf("loaded %d stations", len(radio.AllStations))
 	}
 }
 

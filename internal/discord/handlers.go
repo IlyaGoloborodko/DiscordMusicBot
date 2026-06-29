@@ -19,18 +19,10 @@ func MessageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	//	return
 	//}
 
-	//if strings.HasPrefix(content, "!play") {
-	//	err := voice.PlayRadio(s, m)
-	//	if err != nil {
-	//		log.Fatalf("error playing radio: %v", err)
-	//	}
-	//	return
-	//}
-	//
 	//if strings.HasPrefix(content, "!stop") {
-	//	err := voice.StopRadio(s, m)
+	//	err := voice.Stop(s, m)
 	//	if err != nil {
-	//		log.Fatalf("error stop radio: %v", err)
+	//		log.Fatalf("error stop: %v", err)
 	//	}
 	//	return
 	//}

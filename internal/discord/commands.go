@@ -37,19 +37,6 @@ var (
 			},
 		},
 		{
-			Name:        "radio",
-			Description: "play Radio",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Name:         "query",
-					Description:  "Type something",
-					Type:         discordgo.ApplicationCommandOptionString,
-					Required:     true,
-					Autocomplete: true,
-				},
-			},
-		},
-		{
 			Name:        "stop",
 			Description: "Stop playing",
 		},
@@ -68,15 +55,8 @@ var (
 				logger.Send(fmt.Sprintf("error processing Prompt command: %v", err))
 			}
 		},
-		// TODO remove radio
-		"radio": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-			err := voice.PlayRadio(s, i)
-			if err != nil {
-				logger.Send(fmt.Sprintf("error processing Radio command: %v", err))
-			}
-		},
 		"stop": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-			err := voice.StopRadio(s, i)
+			err := voice.Stop(s, i)
 			if err != nil {
 				logger.Send(fmt.Sprintf("error processing Stop command: %v", err))
 			}
@@ -143,7 +123,7 @@ func RegisterCommands(s *discordgo.Session) error {
 
 func commandNeedsDeferredResponse(name string) bool {
 	switch name {
-	case "play", "prompt", "radio":
+	case "play", "prompt":
 		return true
 	default:
 		return false

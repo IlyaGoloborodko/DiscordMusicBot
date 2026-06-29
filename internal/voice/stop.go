@@ -7,7 +7,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-func StopRadio(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func Stop(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	vc, found := discordUtils.FindVoiceConnection(s, i.GuildID)
 	// Если бота нет в канале, всё равно нужно ответить Дискорду, чтобы не было ошибки
 	if !found || vc == nil {
@@ -30,7 +30,7 @@ func StopRadio(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Flags:   discordgo.MessageFlagsEphemeral,
-			Content: "⏹️ Радио остановлено.",
+			Content: "⏹️ Воспроизведение остановлено.",
 		},
 	})
 	if err != nil {
