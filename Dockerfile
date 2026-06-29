@@ -21,18 +21,10 @@ RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o bot ./cmd/bot
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-venv \
-    python3-pip \
     ffmpeg \
     ca-certificates \
     libopus0 \
     && rm -rf /var/lib/apt/lists/*
-
-RUN python3 -m venv /opt/yt \
-    && /opt/yt/bin/pip install --no-cache-dir -U yt-dlp
-
-ENV PATH="/opt/yt/bin:$PATH"
 
 WORKDIR /app
 

@@ -2,40 +2,52 @@ package music
 
 import (
 	"discordAudio/internal/logger"
+	"encoding/json"
 	"fmt"
-	"os/exec"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
 )
 
 func GetStreamURL(id string) (string, error) {
-	cmd := exec.Command(
-		ytDLPBinary(),
-		"--no-playlist",
-		"-f", "bestaudio",
-		"--print", "url",
-		"--no-warnings",
-		"--quiet",
-		"https://www.youtube.com/watch?v="+id,
-	)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("empty track id")
+	}
 
-	out, err := cmd.CombinedOutput()
+	endpoint := searchServiceAddr() + "/stream?" + url.Values{
+		"id":       {id},
+		"provider": {providerYouTube},
+	}.Encode()
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			logger.Send(fmt.Sprintf("yt-dlp STREAM ERROR: %v\nSTDERR:\n%s", err, string(exitErr.Stderr)))
-		} else {
-			logger.Send(fmt.Sprintf("yt-dlp STREAM ERROR: %v", err))
-		}
 		return "", err
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, line := range lines {
-		url := strings.TrimSpace(line)
-		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-			return url, nil
-		}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		logger.Send(fmt.Sprintf("search service STREAM ERROR: %v", err))
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		logger.Send(fmt.Sprintf("search service STREAM ERROR: %s: %s", resp.Status, strings.TrimSpace(string(body))))
+		return "", fmt.Errorf("search service returned %s", resp.Status)
 	}
 
-	logger.Send(fmt.Sprintf("yt-dlp STREAM ERROR: no valid URL in output: %q", string(out)))
-	return "", fmt.Errorf("yt-dlp did not return a playable URL")
+	var result streamResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("json parse error: %w", err)
+	}
+
+	if strings.TrimSpace(result.StreamURL) == "" {
+		logger.Send(fmt.Sprintf("search service STREAM ERROR: empty stream_url for id %q", id))
+		return "", fmt.Errorf("search service did not return a playable URL")
+	}
+
+	return result.StreamURL, nil
 }
