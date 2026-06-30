@@ -85,12 +85,18 @@ type Player struct {
 	channelID string
 
 	// run-loop-owned state:
-	queue      []aiService.Track
-	pending    []string // spoken lines to play before the next track
-	nowPlaying aiService.Track
-	sinceBreak int
-	djEvery    int
+	queue        []aiService.Track
+	pending      []string // spoken lines to play before the next track
+	nowPlaying   aiService.Track
+	sinceBreak   int
+	djEvery      int
+	autoplay     bool // when the queue empties, ask the agent for more
+	emptyRefills int  // consecutive autoplay refills without a track playing
 }
+
+// maxEmptyRefills caps autoplay attempts that never result in a playable track,
+// so a string of failed resolves can't spin the loop forever.
+const maxEmptyRefills = 3
 
 func newPlayer(s *discordgo.Session, vc *discordgo.VoiceConnection, guildID, channelID string) *Player {
 	p := &Player{
@@ -192,8 +198,15 @@ func (p *Player) run() {
 			continue
 		}
 
-		// 3. Nothing to play -> wait for a command.
+		// 3. Queue empty: in autoplay, ask the agent for the next batch + a
+		//    comment; otherwise wait for a command.
 		if len(p.queue) == 0 {
+			if p.autoplay {
+				if p.emptyRefills < maxEmptyRefills && p.requestMore() {
+					continue
+				}
+				p.autoplay = false // give up auto-continue; wait for the user
+			}
 			p.handle(<-p.cmdCh)
 			continue
 		}
@@ -208,6 +221,7 @@ func (p *Player) run() {
 			p.announce(fmt.Sprintf("⚠️ Не удалось получить поток: %s", track.Title))
 			continue
 		}
+		p.emptyRefills = 0 // a track resolved, autoplay is healthy again
 
 		p.announce("🎧 Играем: " + display(track))
 		if pc := p.playURL(url); pc != nil {
@@ -230,6 +244,7 @@ func (p *Player) handle(c command) {
 		p.queue = nil
 		p.pending = nil
 		p.sinceBreak = 0
+		p.autoplay = false
 		p.nowPlaying = aiService.Track{}
 	case cmdAgent:
 		p.applyAgent(c)
@@ -249,6 +264,11 @@ func (p *Player) applyAgent(c command) {
 		p.queue = append(p.queue, c.tracks...)
 	case aiService.ActionClarify, aiService.ActionNone:
 		// no queue change
+	}
+	// Any user request that brought music (re)arms autoplay.
+	if len(c.tracks) > 0 {
+		p.autoplay = true
+		p.emptyRefills = 0
 	}
 	if s := strings.TrimSpace(c.speak); s != "" {
 		p.pending = append(p.pending, s)
@@ -336,6 +356,44 @@ func (p *Player) djLine() string {
 		return ""
 	}
 	return resp.SpokenAnswer
+}
+
+// requestMore asks the agent for the next batch of tracks plus a spoken comment
+// when the queue runs dry. Returns true if it enqueued anything. Runs on the
+// loop goroutine, so touching queue/pending here is safe.
+func (p *Player) requestMore() bool {
+	p.emptyRefills++
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	resp, err := p.ai.Agent(ctx, aiService.AgentRequest{
+		Session: aiService.AgentSession{GuildID: p.guildID, ChannelID: p.chID()},
+		Message: "[autoplay] The queue just ended. Give a short spoken DJ comment and " +
+			"pick the next set of tracks to keep the same vibe going.",
+		Context: map[string]any{
+			"last_played": p.nowPlaying.Title,
+			"queue_len":   0,
+		},
+	})
+	if err != nil {
+		logger.Send(fmt.Sprintf("autoplay error (guild %s): %v", p.guildID, err))
+		return false
+	}
+
+	if len(resp.Tracks) == 0 {
+		return false
+	}
+
+	p.queue = append(p.queue, resp.Tracks...)
+	p.sinceBreak = 0 // the autoplay comment counts as the break
+	if s := strings.TrimSpace(resp.SpokenAnswer); s != "" {
+		p.pending = append(p.pending, s)
+	}
+	if d := strings.TrimSpace(resp.DisplayText); d != "" {
+		p.announce(d)
+	}
+	return true
 }
 
 func (p *Player) announce(text string) {
