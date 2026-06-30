@@ -37,8 +37,16 @@ var (
 			},
 		},
 		{
+			Name:        "skip",
+			Description: "Skip to the next track",
+		},
+		{
+			Name:        "queue",
+			Description: "Show the current queue",
+		},
+		{
 			Name:        "stop",
-			Description: "Stop playing",
+			Description: "Stop playing and clear the queue",
 		},
 	}
 
@@ -53,6 +61,18 @@ var (
 			err := voice.ProcessPrompt(s, i)
 			if err != nil {
 				logger.Send(fmt.Sprintf("error processing Prompt command: %v", err))
+			}
+		},
+		"skip": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+			err := voice.Skip(s, i)
+			if err != nil {
+				logger.Send(fmt.Sprintf("error processing Skip command: %v", err))
+			}
+		},
+		"queue": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+			err := voice.Queue(s, i)
+			if err != nil {
+				logger.Send(fmt.Sprintf("error processing Queue command: %v", err))
 			}
 		},
 		"stop": func(s *discordgo.Session, i *discordgo.InteractionCreate) {

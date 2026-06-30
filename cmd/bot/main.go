@@ -4,6 +4,7 @@ import (
 	"context"
 	"discordAudio/internal/discord"
 	"discordAudio/internal/logger"
+	"discordAudio/internal/player"
 	"discordAudio/internal/storage"
 	"discordAudio/internal/voice"
 	"log"
@@ -56,6 +57,8 @@ func main() {
 
 	trackCache := voice.NewTrackCache(rdb)
 	voice.InitTrackCache(trackCache)
+
+	voice.InitPlayerManager(player.NewManager())
 
 	token := os.Getenv("DISCORD_TOKEN")
 	if token == "" {

@@ -2,6 +2,7 @@ package stream
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -14,7 +15,9 @@ import (
 	"layeh.com/gopus"
 )
 
-func StartStreaming(vc *discordgo.VoiceConnection, url string) error {
+// StartStreaming plays an audio URL into the voice connection until it ends or
+// ctx is cancelled (cancellation is how the player implements skip/stop).
+func StartStreaming(ctx context.Context, vc *discordgo.VoiceConnection, url string) error {
 	cmd := exec.Command("ffmpeg",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
@@ -25,23 +28,12 @@ func StartStreaming(vc *discordgo.VoiceConnection, url string) error {
 		"-ac", "2",
 		"pipe:1",
 	)
-	return startFFmpegStreaming(vc, cmd)
+	return startFFmpegStreaming(ctx, vc, cmd)
 }
 
-func StartStreamingReader(vc *discordgo.VoiceConnection, audio io.Reader) error {
-	cmd := exec.Command("ffmpeg",
-		"-i", "pipe:0",
-		"-f", "s16le",
-		"-ar", "48000",
-		"-ac", "2",
-		"pipe:1",
-	)
-	cmd.Stdin = audio
-
-	return startFFmpegStreaming(vc, cmd)
-}
-
-func StartStreamingPCMReader(vc *discordgo.VoiceConnection, audio io.Reader, sampleRate int, channels int) error {
+// StartStreamingPCMReader plays raw PCM (e.g. a TTS stream) into the voice
+// connection, transcoding from the given sample rate / channel count.
+func StartStreamingPCMReader(ctx context.Context, vc *discordgo.VoiceConnection, audio io.Reader, sampleRate int, channels int) error {
 	cmd := exec.Command("ffmpeg",
 		"-f", "s16le",
 		"-ar", strconv.Itoa(sampleRate),
@@ -54,23 +46,21 @@ func StartStreamingPCMReader(vc *discordgo.VoiceConnection, audio io.Reader, sam
 	)
 	cmd.Stdin = audio
 
-	return startFFmpegStreaming(vc, cmd)
+	return startFFmpegStreaming(ctx, vc, cmd)
 }
 
-func startFFmpegStreaming(vc *discordgo.VoiceConnection, cmd *exec.Cmd) error {
-	stopChan := StopChan()
-
+func startFFmpegStreaming(ctx context.Context, vc *discordgo.VoiceConnection, cmd *exec.Cmd) error {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
 	}
 
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
 
 	enc, err := gopus.NewEncoder(48000, 2, gopus.Audio)
 	if err != nil {
@@ -84,35 +74,37 @@ func startFFmpegStreaming(vc *discordgo.VoiceConnection, cmd *exec.Cmd) error {
 		_ = waitFFmpeg(cmd, &stderr)
 		return err
 	}
-
 	defer vc.Speaking(false)
 
-	// Buffer for 20ms PCM frames
+	// Buffer for 20ms PCM frames (960 samples * 2 channels).
 	pcmBuf := make([]int16, 960*2)
 
 	for {
 		select {
-		case <-stopChan:
-			// получили сигнал остановки — завершаем цикл
+		case <-ctx.Done():
 			_ = cmd.Process.Kill()
 			_ = waitFFmpeg(cmd, &stderr)
-			return nil
+			return ctx.Err()
 		default:
-			// читаем PCM и отправляем в Discord
 			if err := binary.Read(stdout, binary.LittleEndian, pcmBuf); err != nil {
-				if err != io.EOF {
+				if err != io.EOF && err != io.ErrUnexpectedEOF {
 					log.Println("PCM read error:", err)
 				}
-				if err := waitFFmpeg(cmd, &stderr); err != nil {
-					return err
-				}
-				return nil
+				return waitFFmpeg(cmd, &stderr)
 			}
 			opusFrame, err := enc.Encode(pcmBuf, len(pcmBuf)/2, len(pcmBuf)/2)
 			if err != nil {
 				continue
 			}
-			vc.OpusSend <- opusFrame
+			// Select on ctx as well so a skip/stop interrupts even when the
+			// Discord send buffer is full.
+			select {
+			case vc.OpusSend <- opusFrame:
+			case <-ctx.Done():
+				_ = cmd.Process.Kill()
+				_ = waitFFmpeg(cmd, &stderr)
+				return ctx.Err()
+			}
 		}
 	}
 }

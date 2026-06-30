@@ -16,10 +16,6 @@ type Client struct {
 	http    *http.Client
 }
 
-type PromptRequest struct {
-	Message string `json:"user_message"`
-}
-
 func NewClient() *Client {
 	return &Client{
 		baseURL: os.Getenv("AI_SERVICE_ADDR"),
@@ -28,36 +24,28 @@ func NewClient() *Client {
 	}
 }
 
-func (c *Client) Prompt(ctx context.Context, message string) (*AgentOutput, error) {
+// Agent runs the DJ agent (POST /agent): it decides what to do with the user's
+// message and returns spoken/display text, an action and the tracks to act on.
+func (c *Client) Agent(ctx context.Context, req AgentRequest) (*AgentResponse, error) {
 	if c.baseURL == "" {
 		return nil, fmt.Errorf("AI_SERVICE_ADDR is not set")
 	}
 
-	reqBody := PromptRequest{
-		Message: message,
-	}
-
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(
-		ctx,
-		"POST",
-		c.baseURL+"/prompt",
-		bytes.NewBuffer(jsonData),
-	)
+	jsonData, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/agent", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -67,10 +55,9 @@ func (c *Client) Prompt(ctx context.Context, message string) (*AgentOutput, erro
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("AI service returned %s: %s", resp.Status, string(body))
 	}
-	var result AgentOutput
 
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
+	var result AgentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 

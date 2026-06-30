@@ -1,0 +1,360 @@
+package player
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"discordAudio/internal/aiService"
+	"discordAudio/internal/logger"
+	"discordAudio/internal/music"
+	"discordAudio/internal/stream"
+
+	"github.com/bwmarrin/discordgo"
+)
+
+// TTS stream format produced by the AI service /tts endpoint.
+const (
+	ttsSampleRate = 22050
+	ttsChannels   = 1
+)
+
+func djBreakEvery() int {
+	if v := strings.TrimSpace(os.Getenv("DJ_BREAK_EVERY")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 3
+}
+
+type cmdKind int
+
+const (
+	cmdAgent cmdKind = iota // apply an agent result (speak + action + tracks)
+	cmdSkip
+	cmdStop
+	cmdSnapshot
+)
+
+type snapshot struct {
+	nowPlaying string
+	queue      []string
+}
+
+type command struct {
+	kind    cmdKind
+	speak   string
+	display string
+	action  string
+	tracks  []aiService.Track
+	reply   chan snapshot
+}
+
+// preempts reports whether the command should interrupt whatever is currently
+// playing. Enqueue only grows the queue, so it does not preempt.
+func (c command) preempts() bool {
+	switch c.kind {
+	case cmdSkip, cmdStop:
+		return true
+	case cmdAgent:
+		return c.action != aiService.ActionEnqueue
+	default:
+		return false
+	}
+}
+
+// Player owns the queue and playback for a single guild. All queue mutation
+// happens on its run goroutine; callers interact only through the command
+// channel, so no locks are needed on the queue itself.
+type Player struct {
+	guildID string
+	session *discordgo.Session
+	ai      *aiService.Client
+
+	cmdCh chan command
+	done  chan struct{}
+
+	// binding (vc/channel) can change on rejoin -> guarded.
+	bmu       sync.RWMutex
+	vc        *discordgo.VoiceConnection
+	channelID string
+
+	// run-loop-owned state:
+	queue      []aiService.Track
+	pending    []string // spoken lines to play before the next track
+	nowPlaying aiService.Track
+	sinceBreak int
+	djEvery    int
+}
+
+func newPlayer(s *discordgo.Session, vc *discordgo.VoiceConnection, guildID, channelID string) *Player {
+	p := &Player{
+		guildID:   guildID,
+		session:   s,
+		ai:        aiService.NewClient(),
+		cmdCh:     make(chan command, 8),
+		done:      make(chan struct{}),
+		vc:        vc,
+		channelID: channelID,
+		djEvery:   djBreakEvery(),
+	}
+	go p.run()
+	return p
+}
+
+func (p *Player) bind(vc *discordgo.VoiceConnection, channelID string) {
+	p.bmu.Lock()
+	defer p.bmu.Unlock()
+	p.vc = vc
+	if channelID != "" {
+		p.channelID = channelID
+	}
+}
+
+func (p *Player) conn() *discordgo.VoiceConnection {
+	p.bmu.RLock()
+	defer p.bmu.RUnlock()
+	return p.vc
+}
+
+func (p *Player) chID() string {
+	p.bmu.RLock()
+	defer p.bmu.RUnlock()
+	return p.channelID
+}
+
+// ---- public command API ----
+
+func (p *Player) send(c command) {
+	select {
+	case p.cmdCh <- c:
+	case <-p.done:
+	}
+}
+
+// ApplyAgent submits an agent result to the player.
+func (p *Player) ApplyAgent(r *aiService.AgentResponse) {
+	p.send(command{
+		kind:    cmdAgent,
+		speak:   r.SpokenAnswer,
+		display: r.DisplayText,
+		action:  r.Action,
+		tracks:  r.Tracks,
+	})
+}
+
+// Enqueue appends tracks to the queue (used by the direct /play command).
+func (p *Player) Enqueue(tracks []aiService.Track) {
+	p.send(command{kind: cmdAgent, action: aiService.ActionEnqueue, tracks: tracks})
+}
+
+func (p *Player) Skip() { p.send(command{kind: cmdSkip}) }
+func (p *Player) Stop() { p.send(command{kind: cmdStop}) }
+
+// Snapshot returns the current track title and the queued titles.
+func (p *Player) Snapshot() (string, []string) {
+	reply := make(chan snapshot, 1)
+	p.send(command{kind: cmdSnapshot, reply: reply})
+	select {
+	case s := <-reply:
+		return s.nowPlaying, s.queue
+	case <-p.done:
+		return "", nil
+	}
+}
+
+// ---- run loop ----
+
+func (p *Player) run() {
+	defer close(p.done)
+	for {
+		// 1. Speak any pending lines (acks / DJ breaks) first, interruptibly.
+		if len(p.pending) > 0 {
+			line := p.pending[0]
+			p.pending = p.pending[1:]
+			if pc := p.playTTS(line); pc != nil {
+				p.handle(*pc)
+			}
+			continue
+		}
+
+		// 2. DJ break due and there is something queued to bridge to.
+		if len(p.queue) > 0 && p.djEvery > 0 && p.sinceBreak >= p.djEvery {
+			p.sinceBreak = 0
+			if line := p.djLine(); line != "" {
+				p.pending = append(p.pending, line)
+			}
+			continue
+		}
+
+		// 3. Nothing to play -> wait for a command.
+		if len(p.queue) == 0 {
+			p.handle(<-p.cmdCh)
+			continue
+		}
+
+		// 4. Play the next track.
+		track := p.queue[0]
+		p.queue = p.queue[1:]
+		p.nowPlaying = track
+
+		url, err := music.GetStreamURL(track.ID)
+		if err != nil {
+			p.announce(fmt.Sprintf("⚠️ Не удалось получить поток: %s", track.Title))
+			continue
+		}
+
+		p.announce("🎧 Играем: " + display(track))
+		if pc := p.playURL(url); pc != nil {
+			p.handle(*pc)
+			continue
+		}
+		p.sinceBreak++
+	}
+}
+
+// handle applies a command's effect on queue/state. Called from the idle wait
+// and after a preempting command interrupted playback.
+func (p *Player) handle(c command) {
+	switch c.kind {
+	case cmdSnapshot:
+		c.reply <- p.snapshotNow()
+	case cmdSkip:
+		// Current playback was already cancelled; the loop advances.
+	case cmdStop:
+		p.queue = nil
+		p.pending = nil
+		p.sinceBreak = 0
+		p.nowPlaying = aiService.Track{}
+	case cmdAgent:
+		p.applyAgent(c)
+	}
+}
+
+func (p *Player) applyAgent(c command) {
+	switch c.action {
+	case aiService.ActionReplaceQueue:
+		p.queue = append([]aiService.Track{}, c.tracks...)
+		p.sinceBreak = 0
+	case aiService.ActionPlay:
+		// Play now: jump these to the front of the queue.
+		p.queue = append(append([]aiService.Track{}, c.tracks...), p.queue...)
+		p.sinceBreak = 0
+	case aiService.ActionEnqueue:
+		p.queue = append(p.queue, c.tracks...)
+	case aiService.ActionClarify, aiService.ActionNone:
+		// no queue change
+	}
+	if s := strings.TrimSpace(c.speak); s != "" {
+		p.pending = append(p.pending, s)
+	}
+	if d := strings.TrimSpace(c.display); d != "" {
+		p.announce(d)
+	}
+}
+
+// playURL / playTTS run an item to completion in a child goroutine while the
+// loop stays responsive to commands. They return a preempting command if one
+// arrived, or nil if the item finished on its own.
+func (p *Player) playURL(url string) *command {
+	return p.playItem(func(ctx context.Context) error {
+		return stream.StartStreaming(ctx, p.conn(), url)
+	})
+}
+
+func (p *Player) playTTS(text string) *command {
+	return p.playItem(func(ctx context.Context) error {
+		audio, err := p.ai.Tts(ctx, text)
+		if err != nil {
+			return err
+		}
+		defer audio.Close()
+		return stream.StartStreamingPCMReader(ctx, p.conn(), audio, ttsSampleRate, ttsChannels)
+	})
+}
+
+func (p *Player) playItem(play func(ctx context.Context) error) *command {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- play(ctx) }()
+
+	for {
+		select {
+		case err := <-done:
+			if err != nil && err != context.Canceled {
+				logger.Send(fmt.Sprintf("player playback error (guild %s): %v", p.guildID, err))
+			}
+			return nil
+		case c := <-p.cmdCh:
+			if c.kind == cmdSnapshot {
+				c.reply <- p.snapshotNow()
+				continue
+			}
+			if !c.preempts() {
+				p.applyAgent(c) // enqueue: keep playing, just grow the queue
+				continue
+			}
+			cancel()
+			<-done
+			return &c
+		}
+	}
+}
+
+func (p *Player) snapshotNow() snapshot {
+	titles := make([]string, 0, len(p.queue))
+	for _, t := range p.queue {
+		titles = append(titles, t.Title)
+	}
+	return snapshot{nowPlaying: p.nowPlaying.Title, queue: titles}
+}
+
+// djLine asks the agent for a short spoken DJ transition. Runs on the loop
+// goroutine, so reading queue/nowPlaying here is safe.
+func (p *Player) djLine() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := p.ai.Agent(ctx, aiService.AgentRequest{
+		Session: aiService.AgentSession{GuildID: p.guildID, ChannelID: p.chID()},
+		Message: "[dj_break] Say one short, upbeat DJ transition line to bridge into the next song. " +
+			"Do not search and do not change the queue.",
+		Context: map[string]any{
+			"now_playing": p.nowPlaying.Title,
+			"queue_len":   len(p.queue),
+		},
+	})
+	if err != nil {
+		logger.Send(fmt.Sprintf("dj break error (guild %s): %v", p.guildID, err))
+		return ""
+	}
+	return resp.SpokenAnswer
+}
+
+func (p *Player) announce(text string) {
+	ch := p.chID()
+	if ch == "" || strings.TrimSpace(text) == "" {
+		return
+	}
+	_, _ = p.session.ChannelMessageSend(ch, text)
+}
+
+func display(t aiService.Track) string {
+	if t.URL != "" {
+		if t.Uploader != "" {
+			return fmt.Sprintf("[%s](%s) — %s", t.Title, t.URL, t.Uploader)
+		}
+		return fmt.Sprintf("[%s](%s)", t.Title, t.URL)
+	}
+	if t.Title != "" {
+		return t.Title
+	}
+	return t.ID
+}
