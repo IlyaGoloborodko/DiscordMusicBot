@@ -37,7 +37,6 @@ var (
 type voiceListener struct {
 	session   *discordgo.Session
 	channelID string
-	ssrcUser  sync.Map // uint32 -> userID
 }
 
 type speaker struct {
@@ -64,9 +63,6 @@ func StartVoiceListener(s *discordgo.Session, vc *discordgo.VoiceConnection, cha
 	listenMu.Unlock()
 
 	l := &voiceListener{session: s, channelID: channelID}
-	vc.AddHandler(func(_ *discordgo.VoiceConnection, vs *discordgo.VoiceSpeakingUpdate) {
-		l.ssrcUser.Store(uint32(vs.SSRC), vs.UserID)
-	})
 
 	go l.run(vc)
 }
@@ -121,10 +117,10 @@ func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
 					continue
 				}
 
-				userID := ""
-				if u, ok := l.ssrcUser.Load(ssrc); ok {
-					userID, _ = u.(string)
-				}
+				// The SSRC->user mapping lives in the library: it is populated from
+				// Speaking (OP5) events starting with the burst Discord sends at
+				// connection start — before this listener even exists.
+				userID, _ := vc.SSRCUser(ssrc)
 				go l.process(seg, userID)
 			}
 		}
@@ -151,6 +147,8 @@ func (l *voiceListener) process(pcm []int16, userID string) {
 		return
 	}
 
+	// Only react to utterances containing a wake word; post the transcript to the
+	// text channel. Each speaker is transcribed independently (one per SSRC).
 	text := cleanTranscript(raw)
 	if text == "" || !containsWakeWord(text) || l.channelID == "" {
 		return
@@ -160,5 +158,10 @@ func (l *voiceListener) process(pcm []int16, userID string) {
 	if userID != "" {
 		content = fmt.Sprintf("🎙️ <@%s>: %s", userID, text)
 	}
-	_, _ = l.session.ChannelMessageSend(l.channelID, content)
+	// Show the speaker's name via the mention, but suppress the actual ping so a
+	// live transcript doesn't spam everyone with notifications.
+	_, _ = l.session.ChannelMessageSendComplex(l.channelID, &discordgo.MessageSend{
+		Content:         content,
+		AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}},
+	})
 }

@@ -229,6 +229,18 @@ func (v *VoiceConnection) AddHandler(h VoiceSpeakingUpdateHandler) {
 	v.voiceSpeakingUpdateHandlers = append(v.voiceSpeakingUpdateHandlers, h)
 }
 
+// SSRCUser returns the user ID associated with an audio SSRC, learned from
+// Speaking (OP5) events. Unlike AddHandler-based tracking, this also covers the
+// initial burst of Speaking events Discord sends at connection start — before
+// application handlers get a chance to register.
+func (v *VoiceConnection) SSRCUser(ssrc uint32) (string, bool) {
+	if u, ok := v.ssrcUsers.Load(ssrc); ok {
+		s, _ := u.(string)
+		return s, s != ""
+	}
+	return "", false
+}
+
 // VoiceSpeakingUpdate is a struct for a VoiceSpeakingUpdate event.
 type VoiceSpeakingUpdate struct {
 	UserID string `json:"user_id"`

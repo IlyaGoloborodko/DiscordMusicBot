@@ -37,6 +37,10 @@ var (
 			},
 		},
 		{
+			Name:        "join",
+			Description: "Join your voice channel and start listening",
+		},
+		{
 			Name:        "skip",
 			Description: "Skip to the next track",
 		},
@@ -61,6 +65,12 @@ var (
 			err := voice.ProcessPrompt(s, i)
 			if err != nil {
 				logger.Send(fmt.Sprintf("error processing Prompt command: %v", err))
+			}
+		},
+		"join": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+			err := voice.Join(s, i)
+			if err != nil {
+				logger.Send(fmt.Sprintf("error processing Join command: %v", err))
 			}
 		},
 		"skip": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
