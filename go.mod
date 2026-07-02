@@ -18,5 +18,4 @@ require (
 	golang.org/x/crypto v0.32.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 )
-
-replace github.com/bwmarrin/discordgo => github.com/yeongaori/discordgo v0.0.0-20260307092356-fd09989565b3
+replace github.com/bwmarrin/discordgo => ./third_party/discordgo

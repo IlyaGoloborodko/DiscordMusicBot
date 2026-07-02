@@ -39,7 +39,12 @@ func respond(s *discordgo.Session, i *discordgo.InteractionCreate, content strin
 func ensureVoice(s *discordgo.Session, i *discordgo.InteractionCreate) (*discordgo.VoiceConnection, error) {
 	vc, found := discordUtils.FindVoiceConnection(s, i.GuildID)
 	if found && vc != nil {
+		StartVoiceListener(s, vc, i.ChannelID)
 		return vc, nil
 	}
-	return JoinVoice(s, i)
+	vc, err := JoinVoice(s, i)
+	if err == nil && vc != nil {
+		StartVoiceListener(s, vc, i.ChannelID)
+	}
+	return vc, err
 }

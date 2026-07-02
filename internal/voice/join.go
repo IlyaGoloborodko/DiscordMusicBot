@@ -23,7 +23,9 @@ func JoinVoice(s *discordgo.Session, i *discordgo.InteractionCreate) (*discordgo
 		return nil, nil
 	}
 
-	vc, err := s.ChannelVoiceJoin(i.GuildID, vcID, false, true)
+	// mute=false, deaf=false — deaf must be false so the bot receives audio
+	// (vc.OpusRecv) for voice listening / speech-to-text.
+	vc, err := s.ChannelVoiceJoin(i.GuildID, vcID, false, false)
 	if err != nil {
 		return nil, err
 	}
