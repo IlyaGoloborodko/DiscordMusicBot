@@ -20,14 +20,32 @@ const (
 	sttSampleRate  = 16000
 )
 
-// wakeWords are normalized (lowercase, ё→е) trigger phrases. The bot acts on a
-// transcribed utterance only if it contains one of these. Extend freely.
+// wakeWords are normalized (lowercase, ё→е) trigger phrases. The bot treats an
+// utterance as an AI command only if it contains one of these ("Арсен" and how
+// whisper tends to mishear it). Extend freely.
 var wakeWords = []string{
-	"бебей", "бэбей", "бебэй", "бэбэй",
-	"бейби", "бэйби", "бейбэ", "бэйбэ",
-	"бебис", "бэбис", "бибис", "бэбис",
-	"беби", "бэби", "бейб", "бэйб",
-	"baby", "bebis", "beibi",
+	"арсен", "арсэн", "арсений", "арсеней",
+	"арсеня", "арсюша", "орсен", "арсенчик",
+	"arsen", "arsene", "arseny",
+}
+
+// STT log verbosity levels, selected via the STT_LOG_LEVEL env var.
+const (
+	sttLogSilent   = 0 // nothing
+	sttLogCommands = 1 // only wake-word commands (text after "Арсен") + AI round-trip
+	sttLogAll      = 2 // every transcribed utterance (full whisper output)
+)
+
+// sttLogLevel reads STT_LOG_LEVEL (0/1/2); defaults to sttLogCommands.
+func sttLogLevel() int {
+	switch strings.TrimSpace(os.Getenv("STT_LOG_LEVEL")) {
+	case "0":
+		return sttLogSilent
+	case "2":
+		return sttLogAll
+	default:
+		return sttLogCommands
+	}
 }
 
 func whisperBin() string {
@@ -65,6 +83,22 @@ func containsWakeWord(text string) bool {
 		}
 	}
 	return false
+}
+
+// stripWakeWord returns the command that follows the first wake word in text
+// (e.g. "Арсен, включи музыку" -> "включи музыку"). ok is false if no wake word
+// is present. The returned command is trimmed and may be empty (just the name).
+func stripWakeWord(text string) (command string, ok bool) {
+	words := strings.Fields(text)
+	for idx, w := range words {
+		nw := strings.TrimSpace(normalize(w))
+		for _, wake := range wakeWords {
+			if strings.Contains(nw, wake) {
+				return strings.TrimSpace(strings.Join(words[idx+1:], " ")), true
+			}
+		}
+	}
+	return "", false
 }
 
 // transcribe runs whisper.cpp (exec) on 16kHz-mono PCM, returning the raw text.
