@@ -18,8 +18,16 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-// duckedGain is the music volume multiplier while the AI is "thinking".
+// duckedGain is the extra music volume multiplier while the AI is "thinking".
 const duckedGain = 0.25
+
+// Volume scale: 1-10, default 5. The gain multiplier is level/10, so 10 is the
+// source volume and there is headroom to turn up from the default.
+const (
+	defaultVolume = 5
+	minVolume     = 1
+	maxVolume     = 10
+)
 
 // TTS stream format produced by the AI service /tts endpoint.
 const (
@@ -93,6 +101,7 @@ type Player struct {
 	// Live playback controls, read by the streaming goroutine.
 	duckDepth atomic.Int32 // >0 while the AI is thinking -> music is ducked
 	paused    atomic.Bool  // playback held (position preserved)
+	volume    atomic.Int32 // 1-10 user volume level
 
 	// binding (vc/channel) can change on rejoin -> guarded.
 	bmu       sync.RWMutex
@@ -124,6 +133,7 @@ func newPlayer(s *discordgo.Session, vc *discordgo.VoiceConnection, guildID, cha
 		channelID: channelID,
 		djEvery:   djBreakEvery(),
 	}
+	p.volume.Store(defaultVolume)
 	go p.run()
 	return p
 }
@@ -160,12 +170,34 @@ func (p *Player) Unduck() {
 	}
 }
 
-// gain is the current music volume multiplier, read per frame by the streamer.
+// gain is the current music volume multiplier, read per frame by the streamer:
+// the user volume level (1-10 -> 0.1-1.0), further reduced while ducking.
 func (p *Player) gain() float64 {
+	g := float64(p.Volume()) / float64(maxVolume)
 	if p.duckDepth.Load() > 0 {
-		return duckedGain
+		g *= duckedGain
 	}
-	return 1.0
+	return g
+}
+
+// Volume returns the current volume level (1-10).
+func (p *Player) Volume() int {
+	v := int(p.volume.Load())
+	if v < minVolume {
+		return defaultVolume
+	}
+	return v
+}
+
+// SetVolume sets the volume level, clamped to 1-10, and returns the applied level.
+func (p *Player) SetVolume(level int) int {
+	if level < minVolume {
+		level = minVolume
+	} else if level > maxVolume {
+		level = maxVolume
+	}
+	p.volume.Store(int32(level))
+	return level
 }
 
 func (p *Player) isPaused() bool { return p.paused.Load() }
@@ -192,6 +224,11 @@ func (p *Player) send(c command) {
 // ApplyAgent submits an agent result to the player, reducing its tool calls (or
 // the legacy action) to a single queue/transport effect.
 func (p *Player) ApplyAgent(r *aiService.AgentResponse) {
+	// Volume is an independent, atomic control — apply it directly (it takes
+	// effect on the currently playing stream within a frame).
+	if d := r.VolumeDelta(); d != 0 {
+		p.SetVolume(p.Volume() + d)
+	}
 	action, tracks := r.PrimaryEffect()
 	p.send(command{
 		kind:          cmdAgent,

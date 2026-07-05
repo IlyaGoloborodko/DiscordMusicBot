@@ -9,6 +9,9 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// volumeMin is the minimum for the /volume level option (MinValue is *float64).
+var volumeMin float64 = 1
+
 var (
 	commands = []*discordgo.ApplicationCommand{
 		{
@@ -43,6 +46,20 @@ var (
 		{
 			Name:        "pause",
 			Description: "Pause or resume playback",
+		},
+		{
+			Name:        "volume",
+			Description: "Show or set playback volume (1-10)",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Name:        "level",
+					Description: "Volume level, 1-10",
+					Type:        discordgo.ApplicationCommandOptionInteger,
+					Required:    false,
+					MinValue:    &volumeMin,
+					MaxValue:    10,
+				},
+			},
 		},
 		{
 			Name:        "skip",
@@ -81,6 +98,12 @@ var (
 			err := voice.Pause(s, i)
 			if err != nil {
 				logger.Send(fmt.Sprintf("error processing Pause command: %v", err))
+			}
+		},
+		"volume": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+			err := voice.Volume(s, i)
+			if err != nil {
+				logger.Send(fmt.Sprintf("error processing Volume command: %v", err))
 			}
 		},
 		"skip": func(s *discordgo.Session, i *discordgo.InteractionCreate) {

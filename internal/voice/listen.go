@@ -285,6 +285,7 @@ func (l *voiceListener) handleAI(vc *discordgo.VoiceConnection, userID, message 
 			"now_playing": now,
 			"queue":       queue,
 			"queue_len":   len(queue),
+			"volume":      p.Volume(),
 		},
 		Tools: aiService.PlayerTools(),
 	})

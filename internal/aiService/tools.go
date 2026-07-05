@@ -26,6 +26,8 @@ func PlayerTools() []Tool {
 		{Name: ActionResume, Description: "Resume paused playback.", InputSchema: noArgs},
 		{Name: ActionSkip, Description: "Skip the current track.", InputSchema: noArgs},
 		{Name: ActionStop, Description: "Stop playback and clear the queue.", InputSchema: noArgs},
+		{Name: ActionVolumeUp, Description: "Turn the volume up by one step (louder).", InputSchema: noArgs},
+		{Name: ActionVolumeDown, Description: "Turn the volume down by one step (quieter).", InputSchema: noArgs},
 	}
 }
 

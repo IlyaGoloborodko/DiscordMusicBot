@@ -37,6 +37,7 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 			"now_playing": now,
 			"queue":       queue,
 			"queue_len":   len(queue),
+			"volume":      p.Volume(),
 		},
 		Tools: aiService.PlayerTools(),
 	})

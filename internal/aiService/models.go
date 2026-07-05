@@ -12,6 +12,8 @@ const (
 	ActionResume       = "resume"
 	ActionSkip         = "skip"
 	ActionStop         = "stop"
+	ActionVolumeUp     = "volume_up"
+	ActionVolumeDown   = "volume_down"
 	ActionClarify      = "clarify"
 	ActionNone         = "none"
 )
@@ -65,6 +67,21 @@ type AgentResponse struct {
 	// (e.g. autoplay/DJ prompts that don't send tools).
 	Action string  `json:"action"`
 	Tracks []Track `json:"tracks"`
+}
+
+// VolumeDelta returns +1/-1 if the agent asked to raise/lower the volume by one
+// step, or 0 if no volume tool was called. Applied independently of the
+// queue/transport action.
+func (r *AgentResponse) VolumeDelta() int {
+	for _, tc := range r.ToolCalls {
+		switch tc.Name {
+		case ActionVolumeUp:
+			return 1
+		case ActionVolumeDown:
+			return -1
+		}
+	}
+	return 0
 }
 
 // PrimaryEffect reduces the response to the single queue/transport action the
