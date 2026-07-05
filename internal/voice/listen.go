@@ -27,6 +27,10 @@ const (
 	// Speech gate, applied to the trimmed 16kHz-mono clip before whisper.
 	minSpeechSamples = sttSampleRate * 3 / 10 // ~0.3s of audible content
 	minSpeechRMS     = 250                    // skip quiet/near-silent clips
+
+	// wakeFollowupWindow: after hearing the wake word alone, keep listening this
+	// long for the command in the following segment(s).
+	wakeFollowupWindow = 10 * time.Second
 )
 
 var (
@@ -37,12 +41,29 @@ var (
 type voiceListener struct {
 	session   *discordgo.Session
 	channelID string
+	armed     sync.Map // uint32 ssrc -> time.Time: command follow-up window after a wake word
 }
 
 type speaker struct {
 	dec  *gopus.Decoder
 	buf  []int16
 	last time.Time
+}
+
+// arm/disarm/isArmed track speakers who just said the wake word alone, so the
+// next segment from them is treated as the command (within wakeFollowupWindow).
+func (l *voiceListener) arm(ssrc uint32)    { l.armed.Store(ssrc, time.Now().Add(wakeFollowupWindow)) }
+func (l *voiceListener) disarm(ssrc uint32) { l.armed.Delete(ssrc) }
+func (l *voiceListener) isArmed(ssrc uint32) bool {
+	v, ok := l.armed.Load(ssrc)
+	if !ok {
+		return false
+	}
+	if until, _ := v.(time.Time); time.Now().Before(until) {
+		return true
+	}
+	l.armed.Delete(ssrc)
+	return false
 }
 
 // StartVoiceListener captures voice in the channel: it decodes each speaker's
@@ -121,63 +142,101 @@ func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
 				// Speaking (OP5) events starting with the burst Discord sends at
 				// connection start — before this listener even exists.
 				userID, _ := vc.SSRCUser(ssrc)
-				go l.process(vc, seg, userID)
+				go l.process(vc, seg, userID, ssrc)
 			}
 		}
 	}
 }
 
-func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, userID string) {
-	// 48k stereo -> 16k mono, then drop leading/trailing silence so whisper isn't
-	// fed the up-to-3s pause (the main hallucination trigger).
+func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, userID string, ssrc uint32) {
 	lvl := sttLogLevel()
 
+	// 48k stereo -> 16k mono, then drop leading/trailing silence so the models
+	// aren't fed the up-to-3s pause (the main hallucination trigger).
 	mono := downmixTo16kMono(pcm)
 	speech := trimSilence(mono)
 	speechMs := len(speech) * 1000 / sttSampleRate
 
-	// Skip segments with no real speech (silence/noise) -> avoids hallucinations.
+	// Skip segments with no real speech (silence/noise).
 	if len(speech) < minSpeechSamples || rms(speech) < minSpeechRMS {
 		if lvl >= sttLogAll {
-			log.Printf("[stt] user=%s SKIP gate (speechMs=%d rms=%.0f, need >=%dms & rms>=%d)",
-				userID, speechMs, rms(speech), minSpeechSamples*1000/sttSampleRate, minSpeechRMS)
+			log.Printf("[stt] user=%s SKIP gate (speechMs=%d rms=%.0f)", userID, speechMs, rms(speech))
 		}
+		return
+	}
+	if l.channelID == "" {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
+	// Without a Vosk gate: run whisper on every segment and look for the wake word
+	// in its output (original behavior).
+	if voskServerAddr() == "" {
+		raw, err := transcribe(ctx, speech)
+		if err != nil {
+			if lvl >= sttLogCommands {
+				log.Println("[stt] whisper error:", err)
+			}
+			return
+		}
+		text := cleanTranscript(raw)
+		command, wake := stripWakeWord(text)
+		if lvl >= sttLogAll {
+			log.Printf("[stt] user=%s speechMs=%d WHISPER=%q wake=%v cmd=%q", userID, speechMs, raw, wake, command)
+		}
+		if wake && command != "" {
+			l.handleAI(vc, userID, command)
+		}
+		return
+	}
+
+	// With a Vosk gate: cheap wake-word detection first, heavy whisper only for
+	// the command.
+	gate, err := voskTranscribe(ctx, speech)
+	if err != nil {
+		if lvl >= sttLogCommands {
+			log.Println("[stt] vosk error:", err)
+		}
+		return
+	}
+	voskCmd, wake := stripWakeWord(gate)
+	armed := l.isArmed(ssrc)
+	if lvl >= sttLogAll {
+		log.Printf("[stt] user=%s speechMs=%d VOSK=%q wake=%v armed=%v", userID, speechMs, gate, wake, armed)
+	}
+
+	switch {
+	case wake && voskCmd == "":
+		// Only the wake word this segment -> listen for the command next (<=10s).
+		l.arm(ssrc)
+		if lvl >= sttLogCommands {
+			log.Printf("[stt] user=%s wake word heard, waiting for command", userID)
+		}
+		return
+	case wake || armed:
+		// Command present: same segment as the wake word, or the armed follow-up.
+		l.disarm(ssrc)
+	default:
+		return // no wake, not armed -> heavy model not run
+	}
+
+	// Accurate transcription of the command via the main whisper model.
 	raw, err := transcribe(ctx, speech)
 	if err != nil {
 		if lvl >= sttLogCommands {
-			log.Println("[stt] transcribe error:", err)
+			log.Println("[stt] whisper error:", err)
 		}
 		return
 	}
-
-	// Only act on utterances addressed to the assistant ("Арсен ..."). Everything
-	// after the wake word is the command. Each speaker is transcribed on its own
-	// SSRC, so we only ever act on the person who actually said the wake word.
-	text := cleanTranscript(raw)
-	command, wake := stripWakeWord(text)
-
-	// Level 2: log every transcribed utterance (full whisper output).
+	command := extractCommand(cleanTranscript(raw))
 	if lvl >= sttLogAll {
-		log.Printf("[stt] user=%s speechMs=%d rms=%.0f wake=%v raw=%q clean=%q cmd=%q",
-			userID, speechMs, rms(speech), wake, raw, text, command)
+		log.Printf("[stt] user=%s WHISPER=%q command=%q", userID, raw, command)
 	}
-
-	if !wake || l.channelID == "" {
-		return
+	if command != "" {
+		l.handleAI(vc, userID, command)
 	}
-	if command == "" {
-		if lvl >= sttLogCommands {
-			log.Printf("[stt] user=%s wake word only, no command", userID)
-		}
-		return
-	}
-	l.handleAI(vc, userID, command)
 }
 
 // handleAI routes a spoken command to the AI agent (same path as /prompt) and

@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"mime/multipart"
+	"net/http"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/gorilla/websocket"
 )
 
 // Discord delivers 48kHz stereo; whisper.cpp wants 16kHz mono.
@@ -21,18 +26,19 @@ const (
 )
 
 // wakeWords are normalized (lowercase, ё→е) trigger phrases. The bot treats an
-// utterance as an AI command only if it contains one of these ("Арсен" and how
-// whisper tends to mishear it). Extend freely.
+// utterance as an AI command only if it contains one of these ("Марина" and how
+// whisper/vosk tend to hear it). Matching is substring-based, so "марин" also
+// catches марину/марине/маринка etc. Extend freely.
 var wakeWords = []string{
-	"арсен", "арсэн", "арсений", "арсеней",
-	"арсеня", "арсюша", "орсен", "арсенчик",
-	"arsen", "arsene", "arseny",
+	"марин", "марина", "маринка", "мариночка",
+	"мариш", "мариша", "маришка",
+	"marina", "marin",
 }
 
 // STT log verbosity levels, selected via the STT_LOG_LEVEL env var.
 const (
 	sttLogSilent   = 0 // nothing
-	sttLogCommands = 1 // only wake-word commands (text after "Арсен") + AI round-trip
+	sttLogCommands = 1 // only wake-word commands (text after "Марина") + AI round-trip
 	sttLogAll      = 2 // every transcribed utterance (full whisper output)
 )
 
@@ -48,15 +54,90 @@ func sttLogLevel() int {
 	}
 }
 
-func whisperBin() string {
-	if v := strings.TrimSpace(os.Getenv("WHISPER_BIN")); v != "" {
-		return v
-	}
-	return "whisper-cli"
+// whisperServerAddr is the base URL of the whisper HTTP service (e.g.
+// onerahmet/openai-whisper-asr-webservice), like "http://127.0.0.1:9010".
+func whisperServerAddr() string {
+	return strings.TrimSpace(os.Getenv("WHISPER_SERVER_ADDR"))
 }
 
-func whisperModel() string {
-	return strings.TrimSpace(os.Getenv("WHISPER_MODEL"))
+// voskServerAddr is the websocket URL of the small Vosk model server (e.g.
+// alphacep/kaldi-ru), like "ws://127.0.0.1:2700". When set, it is used as a
+// cheap wake-word gate before the heavy whisper pass.
+func voskServerAddr() string {
+	return strings.TrimSpace(os.Getenv("VOSK_SERVER_ADDR"))
+}
+
+// voskTranscribe runs the small Vosk model over the clip via its websocket API
+// (alphacep/kaldi-ru): send a sample-rate config, stream raw 16-bit PCM, send
+// EOF, then read the final result. Returns the recognized text.
+func voskTranscribe(ctx context.Context, mono []int16) (string, error) {
+	addr := voskServerAddr()
+	if addr == "" {
+		return "", fmt.Errorf("VOSK_SERVER_ADDR is not set")
+	}
+
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, addr, nil)
+	if err != nil {
+		return "", fmt.Errorf("vosk dial: %w", err)
+	}
+	defer conn.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetWriteDeadline(dl)
+		_ = conn.SetReadDeadline(dl)
+	}
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"config":{"sample_rate":16000}}`)); err != nil {
+		return "", err
+	}
+
+	// Vosk wants raw 16-bit little-endian mono PCM (no WAV header), chunked.
+	pcm := make([]byte, len(mono)*2)
+	for i, s := range mono {
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(s))
+	}
+	const chunk = 8000
+	for off := 0; off < len(pcm); off += chunk {
+		end := off + chunk
+		if end > len(pcm) {
+			end = len(pcm)
+		}
+		if err := conn.WriteMessage(websocket.BinaryMessage, pcm[off:end]); err != nil {
+			return "", err
+		}
+	}
+	// vosk-server compares this end-of-stream marker with an exact string
+	// (including the spaces around the colon), so it must match verbatim.
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"eof" : 1}`)); err != nil {
+		return "", err
+	}
+
+	// Read until the final result (a message carrying a "text" field, as opposed
+	// to interim "partial" messages).
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			return "", err
+		}
+		if bytes.Contains(msg, []byte(`"text"`)) {
+			var r struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(msg, &r); err != nil {
+				return "", err
+			}
+			return r.Text, nil
+		}
+	}
+}
+
+// extractCommand pulls the command out of a transcript: the text after the wake
+// word if present, otherwise the whole (trimmed) text — used for the armed
+// follow-up segment where the command has no wake word.
+func extractCommand(text string) string {
+	if cmd, ok := stripWakeWord(text); ok {
+		return cmd
+	}
+	return strings.TrimSpace(text)
 }
 
 // normalize lowercases, folds ё→е and replaces non-letters/digits with spaces so
@@ -86,7 +167,7 @@ func containsWakeWord(text string) bool {
 }
 
 // stripWakeWord returns the command that follows the first wake word in text
-// (e.g. "Арсен, включи музыку" -> "включи музыку"). ok is false if no wake word
+// (e.g. "Марина, включи музыку" -> "включи музыку"). ok is false if no wake word
 // is present. The returned command is trimmed and may be empty (just the name).
 func stripWakeWord(text string) (command string, ok bool) {
 	words := strings.Fields(text)
@@ -101,43 +182,52 @@ func stripWakeWord(text string) (command string, ok bool) {
 	return "", false
 }
 
-// transcribe runs whisper.cpp (exec) on 16kHz-mono PCM, returning the raw text.
+// transcribe turns 16kHz-mono PCM into text by posting it to the whisper HTTP
+// service (onerahmet/openai-whisper-asr-webservice): POST /asr with the WAV as
+// the "audio_file" multipart field; output=txt returns the plain transcript.
+// encode=false because we already send 16kHz-mono WAV (skips server-side ffmpeg).
 func transcribe(ctx context.Context, mono []int16) (string, error) {
-	model := whisperModel()
-	if model == "" {
-		return "", fmt.Errorf("WHISPER_MODEL is not set")
+	addr := whisperServerAddr()
+	if addr == "" {
+		return "", fmt.Errorf("WHISPER_SERVER_ADDR is not set")
 	}
 
 	wav := pcmToWAV(mono, sttSampleRate, 1)
 
-	tmp, err := os.CreateTemp("", "utt-*.wav")
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("audio_file", "utt.wav")
 	if err != nil {
 		return "", err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(wav); err != nil {
-		_ = tmp.Close()
+	if _, err := part.Write(wav); err != nil {
 		return "", err
 	}
-	if err := tmp.Close(); err != nil {
+	if err := mw.Close(); err != nil {
 		return "", err
 	}
 
-	cmd := exec.CommandContext(ctx, whisperBin(),
-		"-m", model,
-		"-l", "ru",
-		"-nt", // no timestamps -> plain text on stdout
-		"-f", tmpName,
-	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("whisper failed: %w; stderr: %s", err, strings.TrimSpace(stderr.String()))
+	url := strings.TrimRight(addr, "/") + "/asr?task=transcribe&language=ru&output=txt&encode=false"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
+	if err != nil {
+		return "", err
 	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	return cleanWhisperOutput(stdout.String()), nil
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("whisper server request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("whisper server %s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+	return cleanWhisperOutput(string(out)), nil
 }
 
 func cleanWhisperOutput(s string) string {
