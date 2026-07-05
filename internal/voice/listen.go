@@ -182,12 +182,14 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 			return
 		}
 		text := cleanTranscript(raw)
-		command, wake := stripWakeWord(text)
+		after, wake := stripWakeWord(text)
 		if lvl >= sttLogAll {
-			log.Printf("[stt] user=%s speechMs=%d WHISPER=%q wake=%v cmd=%q", userID, speechMs, raw, wake, command)
+			log.Printf("[stt] user=%s speechMs=%d WHISPER=%q wake=%v", userID, speechMs, raw, wake)
 		}
-		if wake && command != "" {
-			l.handleAI(vc, userID, command)
+		// Send the full text (wake word included) to the AI, but only when there
+		// is an actual command after the wake word.
+		if wake && after != "" {
+			l.handleAI(vc, userID, text)
 		}
 		return
 	}
@@ -219,10 +221,25 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 		// Command present: same segment as the wake word, or the armed follow-up.
 		l.disarm(ssrc)
 	default:
-		return // no wake, not armed -> heavy model not run
+		return // no wake, not armed -> command model not run
 	}
 
-	// Accurate transcription of the command via the main whisper model.
+	// Vosk-only: use the wake-word pass's own transcript as the command (no
+	// whisper). Better at Russian, just without punctuation. Full text incl. the
+	// wake word is sent to the AI.
+	if voskOnly() {
+		command := cleanTranscript(gate)
+		if lvl >= sttLogCommands {
+			log.Printf("[stt] user=%s VOSK command=%q", userID, command)
+		}
+		if command != "" {
+			l.handleAI(vc, userID, command)
+		}
+		return
+	}
+
+	// Otherwise transcribe the command with the main whisper model; the full text
+	// (wake word included) goes to the AI.
 	raw, err := transcribe(ctx, speech)
 	if err != nil {
 		if lvl >= sttLogCommands {
@@ -230,7 +247,7 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 		}
 		return
 	}
-	command := extractCommand(cleanTranscript(raw))
+	command := cleanTranscript(raw)
 	if lvl >= sttLogAll {
 		log.Printf("[stt] user=%s WHISPER=%q command=%q", userID, raw, command)
 	}
@@ -250,10 +267,26 @@ func (l *voiceListener) handleAI(vc *discordgo.VoiceConnection, userID, message 
 		log.Printf("[stt] -> AI user=%s msg=%q", userID, message)
 	}
 
+	// Duck the music while the AI thinks; restore when the response lands (if it
+	// starts new playback that stream begins un-ducked).
+	p := playerManager.Get(l.session, vc, vc.GuildID, l.channelID)
+	p.Duck()
+	defer p.Unduck()
+
+	// Give the agent the current queue so it can answer / voice questions about
+	// what is playing and what is next.
+	now, queue := p.Snapshot()
+
 	ai := aiService.NewClient()
 	resp, err := ai.Agent(ctx, aiService.AgentRequest{
 		Session: l.agentSession(vc.GuildID, userID),
 		Message: message,
+		Context: map[string]any{
+			"now_playing": now,
+			"queue":       queue,
+			"queue_len":   len(queue),
+		},
+		Tools: aiService.PlayerTools(),
 	})
 	if err != nil {
 		if lvl >= sttLogCommands {
@@ -262,19 +295,14 @@ func (l *voiceListener) handleAI(vc *discordgo.VoiceConnection, userID, message 
 		return
 	}
 	if lvl >= sttLogCommands {
-		log.Printf("[stt] <- AI action=%q tracks=%d display=%q clarify=%q",
-			resp.Action, len(resp.Tracks), resp.DisplayText, resp.Clarification)
+		action, tracks := resp.PrimaryEffect()
+		log.Printf("[stt] <- AI tool_calls=%d action=%q tracks=%d display=%q clarify=%q",
+			len(resp.ToolCalls), action, len(tracks), resp.DisplayText, resp.Clarification)
 	}
 
-	ack := resp.DisplayText
-	if resp.Action == aiService.ActionClarify && resp.Clarification != "" {
-		ack = resp.Clarification
-	}
-	if ack != "" {
-		l.send(ack)
-	}
-
-	playerManager.Get(l.session, vc, vc.GuildID, l.channelID).ApplyAgent(resp)
+	// The player announces the display/clarification text (single source),
+	// applies the action and handles playback.
+	p.ApplyAgent(resp)
 }
 
 // agentSession builds the AI session for a spoken command, resolving the
@@ -293,15 +321,4 @@ func (l *voiceListener) agentSession(guildID, userID string) aiService.AgentSess
 		}
 	}
 	return sess
-}
-
-// send posts a message to the listener's text channel without pinging anyone.
-func (l *voiceListener) send(content string) {
-	if l.channelID == "" {
-		return
-	}
-	_, _ = l.session.ChannelMessageSendComplex(l.channelID, &discordgo.MessageSend{
-		Content:         content,
-		AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}},
-	})
 }

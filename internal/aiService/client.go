@@ -6,9 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"strings"
 )
+
+// aiDebug enables logging of the raw request/response to the AI service
+// (AI_DEBUG=1/true).
+func aiDebug() bool {
+	v := strings.TrimSpace(os.Getenv("AI_DEBUG"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
 
 type Client struct {
 	baseURL string
@@ -35,6 +44,9 @@ func (c *Client) Agent(ctx context.Context, req AgentRequest) (*AgentResponse, e
 	if err != nil {
 		return nil, err
 	}
+	if aiDebug() {
+		log.Printf("[ai] -> POST /agent %s", jsonData)
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/agent", bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -51,13 +63,20 @@ func (c *Client) Agent(ctx context.Context, req AgentRequest) (*AgentResponse, e
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if aiDebug() {
+		log.Printf("[ai] <- %s %s", resp.Status, body)
+	}
+
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("AI service returned %s: %s", resp.Status, string(body))
+		return nil, fmt.Errorf("AI service returned %s: %s", resp.Status, string(body[:min(len(body), 1024)]))
 	}
 
 	var result AgentResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, err
 	}
 

@@ -1,10 +1,17 @@
 package aiService
 
-// Agent action values returned by POST /agent.
+import "encoding/json"
+
+// Agent action values. These double as the client tool names, so the bot's tool
+// registry and the legacy `action` field share one vocabulary.
 const (
 	ActionPlay         = "play"
 	ActionEnqueue      = "enqueue"
 	ActionReplaceQueue = "replace_queue"
+	ActionPause        = "pause"
+	ActionResume       = "resume"
+	ActionSkip         = "skip"
+	ActionStop         = "stop"
 	ActionClarify      = "clarify"
 	ActionNone         = "none"
 )
@@ -27,16 +34,57 @@ type AgentSession struct {
 	UserName  string `json:"user_name,omitempty"`
 }
 
+// Tool describes a client capability the agent may invoke. The bot declares the
+// tools it can execute so the AI service stays decoupled from Discord.
+type Tool struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"input_schema"`
+}
+
+// ToolCall is a tool the agent chose to invoke, with its arguments.
+type ToolCall struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
 type AgentRequest struct {
 	Session AgentSession   `json:"session"`
 	Message string         `json:"message"`
 	Context map[string]any `json:"context,omitempty"`
+	Tools   []Tool         `json:"tools,omitempty"`
 }
 
 type AgentResponse struct {
-	SpokenAnswer  string  `json:"spoken_answer"`
-	DisplayText   string  `json:"display_text"`
-	Action        string  `json:"action"`
-	Tracks        []Track `json:"tracks"`
-	Clarification string  `json:"clarification"`
+	SpokenAnswer  string     `json:"spoken_answer"`
+	DisplayText   string     `json:"display_text"`
+	ToolCalls     []ToolCall `json:"tool_calls"`
+	Clarification string     `json:"clarification"`
+
+	// Legacy single-action fields, used as a fallback when tool_calls is empty
+	// (e.g. autoplay/DJ prompts that don't send tools).
+	Action string  `json:"action"`
+	Tracks []Track `json:"tracks"`
+}
+
+// PrimaryEffect reduces the response to the single queue/transport action the
+// player applies plus its tracks. Tool calls take precedence over the legacy
+// action field.
+func (r *AgentResponse) PrimaryEffect() (action string, tracks []Track) {
+	for _, tc := range r.ToolCalls {
+		switch tc.Name {
+		case ActionPlay, ActionEnqueue, ActionReplaceQueue:
+			var a struct {
+				Tracks []Track `json:"tracks"`
+			}
+			_ = json.Unmarshal(tc.Arguments, &a)
+			return tc.Name, a.Tracks
+		case ActionPause, ActionResume, ActionSkip, ActionStop:
+			return tc.Name, nil
+		}
+	}
+	if r.Action != "" {
+		return r.Action, r.Tracks
+	}
+	return ActionNone, nil
 }

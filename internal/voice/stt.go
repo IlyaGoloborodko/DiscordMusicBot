@@ -67,6 +67,13 @@ func voskServerAddr() string {
 	return strings.TrimSpace(os.Getenv("VOSK_SERVER_ADDR"))
 }
 
+// voskOnly reports whether Vosk should also produce the command text (skipping
+// whisper entirely). Enabled with STT_VOSK_ONLY=1/true.
+func voskOnly() bool {
+	v := strings.TrimSpace(os.Getenv("STT_VOSK_ONLY"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 // voskTranscribe runs the small Vosk model over the clip via its websocket API
 // (alphacep/kaldi-ru): send a sample-rate config, stream raw 16-bit PCM, send
 // EOF, then read the final result. Returns the recognized text.
@@ -128,16 +135,6 @@ func voskTranscribe(ctx context.Context, mono []int16) (string, error) {
 			return r.Text, nil
 		}
 	}
-}
-
-// extractCommand pulls the command out of a transcript: the text after the wake
-// word if present, otherwise the whole (trimmed) text — used for the armed
-// follow-up segment where the command has no wake word.
-func extractCommand(text string) string {
-	if cmd, ok := stripWakeWord(text); ok {
-		return cmd
-	}
-	return strings.TrimSpace(text)
 }
 
 // normalize lowercases, folds ё→е and replaces non-letters/digits with spaces so

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"discordAudio/internal/aiService"
@@ -16,6 +17,9 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 )
+
+// duckedGain is the music volume multiplier while the AI is "thinking".
+const duckedGain = 0.25
 
 // TTS stream format produced by the AI service /tts endpoint.
 const (
@@ -47,22 +51,29 @@ type snapshot struct {
 }
 
 type command struct {
-	kind    cmdKind
-	speak   string
-	display string
-	action  string
-	tracks  []aiService.Track
-	reply   chan snapshot
+	kind          cmdKind
+	speak         string
+	display       string
+	clarification string
+	action        string
+	tracks        []aiService.Track
+	reply         chan snapshot
 }
 
 // preempts reports whether the command should interrupt whatever is currently
-// playing. Enqueue only grows the queue, so it does not preempt.
+// playing. Only starting new music (play/replace) or skip/stop interrupts;
+// enqueue, pause/resume, and clarify/none keep the current track going (so the
+// AI "doing nothing" leaves the music untouched).
 func (c command) preempts() bool {
 	switch c.kind {
 	case cmdSkip, cmdStop:
 		return true
 	case cmdAgent:
-		return c.action != aiService.ActionEnqueue
+		switch c.action {
+		case aiService.ActionPlay, aiService.ActionReplaceQueue, aiService.ActionSkip, aiService.ActionStop:
+			return true
+		}
+		return false
 	default:
 		return false
 	}
@@ -78,6 +89,10 @@ type Player struct {
 
 	cmdCh chan command
 	done  chan struct{}
+
+	// Live playback controls, read by the streaming goroutine.
+	duckDepth atomic.Int32 // >0 while the AI is thinking -> music is ducked
+	paused    atomic.Bool  // playback held (position preserved)
 
 	// binding (vc/channel) can change on rejoin -> guarded.
 	bmu       sync.RWMutex
@@ -134,6 +149,37 @@ func (p *Player) chID() string {
 	return p.channelID
 }
 
+// ---- live playback controls (safe from any goroutine) ----
+
+// Duck/Unduck lower the music volume while the AI is thinking. They nest, so
+// concurrent requests don't un-duck early; music restores when all clear.
+func (p *Player) Duck() { p.duckDepth.Add(1) }
+func (p *Player) Unduck() {
+	if p.duckDepth.Add(-1) < 0 {
+		p.duckDepth.Store(0)
+	}
+}
+
+// gain is the current music volume multiplier, read per frame by the streamer.
+func (p *Player) gain() float64 {
+	if p.duckDepth.Load() > 0 {
+		return duckedGain
+	}
+	return 1.0
+}
+
+func (p *Player) isPaused() bool { return p.paused.Load() }
+
+// SetPaused pauses/resumes music playback (position is preserved).
+func (p *Player) SetPaused(v bool) { p.paused.Store(v) }
+
+// TogglePause flips pause and returns the new state.
+func (p *Player) TogglePause() bool {
+	v := !p.paused.Load()
+	p.paused.Store(v)
+	return v
+}
+
 // ---- public command API ----
 
 func (p *Player) send(c command) {
@@ -143,14 +189,17 @@ func (p *Player) send(c command) {
 	}
 }
 
-// ApplyAgent submits an agent result to the player.
+// ApplyAgent submits an agent result to the player, reducing its tool calls (or
+// the legacy action) to a single queue/transport effect.
 func (p *Player) ApplyAgent(r *aiService.AgentResponse) {
+	action, tracks := r.PrimaryEffect()
 	p.send(command{
-		kind:    cmdAgent,
-		speak:   r.SpokenAnswer,
-		display: r.DisplayText,
-		action:  r.Action,
-		tracks:  r.Tracks,
+		kind:          cmdAgent,
+		speak:         r.SpokenAnswer,
+		display:       r.DisplayText,
+		clarification: r.Clarification,
+		action:        action,
+		tracks:        tracks,
 	})
 }
 
@@ -262,19 +311,39 @@ func (p *Player) applyAgent(c command) {
 		p.sinceBreak = 0
 	case aiService.ActionEnqueue:
 		p.queue = append(p.queue, c.tracks...)
+	case aiService.ActionSkip:
+		// Current playback was already cancelled (preempt); the loop advances.
+	case aiService.ActionStop:
+		p.queue = nil
+		p.pending = nil
+		p.sinceBreak = 0
+		p.autoplay = false
+		p.nowPlaying = aiService.Track{}
+	case aiService.ActionPause:
+		p.SetPaused(true)
+	case aiService.ActionResume:
+		p.SetPaused(false)
 	case aiService.ActionClarify, aiService.ActionNone:
 		// no queue change
 	}
-	// Any user request that brought music (re)arms autoplay.
+	// Any user request that brought music (re)arms autoplay and resumes.
 	if len(c.tracks) > 0 {
 		p.autoplay = true
 		p.emptyRefills = 0
+		p.SetPaused(false)
 	}
 	if s := strings.TrimSpace(c.speak); s != "" {
 		p.pending = append(p.pending, s)
 	}
-	if d := strings.TrimSpace(c.display); d != "" {
-		p.announce(d)
+	// Announce the display text, falling back to the clarification question when
+	// there is no display text (in tool-calling mode a question arrives with no
+	// action and just a clarification). Single place this is posted.
+	msg := strings.TrimSpace(c.display)
+	if msg == "" {
+		msg = strings.TrimSpace(c.clarification)
+	}
+	if msg != "" {
+		p.announce(msg)
 	}
 }
 
@@ -283,7 +352,10 @@ func (p *Player) applyAgent(c command) {
 // arrived, or nil if the item finished on its own.
 func (p *Player) playURL(url string) *command {
 	return p.playItem(func(ctx context.Context) error {
-		return stream.StartStreaming(ctx, p.conn(), url)
+		return stream.StartStreaming(ctx, p.conn(), url, stream.Controls{
+			Gain:   p.gain,
+			Paused: p.isPaused,
+		})
 	})
 }
 
@@ -294,7 +366,8 @@ func (p *Player) playTTS(text string) *command {
 			return err
 		}
 		defer audio.Close()
-		return stream.StartStreamingPCMReader(ctx, p.conn(), audio, ttsSampleRate, ttsChannels)
+		// The AI's own voice plays at full volume and ignores pause.
+		return stream.StartStreamingPCMReader(ctx, p.conn(), audio, ttsSampleRate, ttsChannels, stream.Controls{})
 	})
 }
 

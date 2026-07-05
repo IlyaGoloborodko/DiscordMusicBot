@@ -41,6 +41,10 @@ var (
 			Description: "Join your voice channel and start listening",
 		},
 		{
+			Name:        "pause",
+			Description: "Pause or resume playback",
+		},
+		{
 			Name:        "skip",
 			Description: "Skip to the next track",
 		},
@@ -71,6 +75,12 @@ var (
 			err := voice.Join(s, i)
 			if err != nil {
 				logger.Send(fmt.Sprintf("error processing Join command: %v", err))
+			}
+		},
+		"pause": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+			err := voice.Pause(s, i)
+			if err != nil {
+				logger.Send(fmt.Sprintf("error processing Pause command: %v", err))
 			}
 		},
 		"skip": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
