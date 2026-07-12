@@ -1,13 +1,93 @@
-# .env:
+# discordAudio
 
-DISCORD_TOKEN=
+A Go Discord **music + AI-DJ bot**. Control it with slash commands **or by voice** — say
+the wake word **"Марина"** followed by a request, and an AI agent decides what to do
+(play, queue, pause, skip, change volume, describe the queue).
 
-RADIO_URL=
+## How it works
 
-DEBUG_GUIID=
+Music reaches the queue two ways:
 
-REDIS_ADDR=
+```
+Voice / AI:  Discord voice ─► bot ─► Vosk (wake word) ─► whisper ─► AI agent (/agent, tools)
+                                                                         └─► returns tracks
+Direct:      /play ─► bot ─► search service (/search)  ─► tracks
 
-TG_BOT_SECRET=
+Then for every queued track:
+             bot ─► search service (/stream, resolve URL) ─► ffmpeg ─► voice channel
+             AI spoken replies ─► TTS (/tts) ─► voice channel
+```
 
-TG_CHAT_ID=
+The bot talks to the **search service directly** — for `/play` (search) and to resolve
+the stream URL of every track before playback — and to the **AI agent** for voice /
+`/prompt` requests (the agent runs its own search and returns tracks). Speech recognition
+runs locally (Vosk + whisper containers); the AI agent and search are separate Python
+services.
+
+## Services
+
+| Component | Default addr | Role |
+|---|---|---|
+| **DiscordAiService** | `http://127.0.0.1:8000` | `POST /agent` (decisions), `POST /tts` (Piper) |
+| **DsBotSearchService** | `http://127.0.0.1:9000` | `/search`, `/stream`, `/playlist` |
+| **whisper** (STT) | `http://127.0.0.1:9010` | `onerahmet/openai-whisper-asr-webservice` |
+| **Vosk** (wake word) | `ws://127.0.0.1:2700` | `alphacep/kaldi-ru` |
+
+## Prerequisites
+
+- **Go** 1.25+, a **C toolchain** (CGO — for `gopus`/libopus), and **ffmpeg** on `PATH`.
+- **Docker** for the STT containers.
+- The two Python services running (DiscordAiService, DsBotSearchService).
+- A Discord bot with the **voice** intents; it must join non-deaf to receive audio.
+
+## Setup
+
+1. **Config**
+   ```
+   cp .env.example .env      # then fill DISCORD_TOKEN, AI_SERVICE_ADDR, etc.
+   ```
+
+2. **STT containers** (PowerShell, one line each)
+   ```powershell
+   # whisper (CPU). Port 9000 is the search service, so map to 9010.
+   docker run -d --name whisper --restart unless-stopped -p 9010:9000 -e ASR_ENGINE=faster_whisper -e ASR_MODEL=small -v whisper-cache:/root/.cache onerahmet/openai-whisper-asr-webservice:latest
+
+   # Vosk (Russian) wake-word gate
+   docker run -d --name vosk-ru --restart unless-stopped -p 2700:2700 alphacep/kaldi-ru
+   ```
+   > GPU: use the `-gpu` image + `--gpus all` **only** with an NVIDIA card whose driver
+   > supports the image's CUDA. RTX 50-series (Blackwell/sm_120) needs `faster_whisper`
+   > (CTranslate2), not `openai_whisper` (PyTorch).
+
+3. **Run the bot**
+   ```
+   go build -o bot.exe ./cmd/bot   # then run ./bot.exe (fast restarts)
+   ```
+
+## Commands
+
+| Command | Action |
+|---|---|
+| `/play <query>` | Search and queue music |
+| `/prompt <text>` | Talk to the AI DJ (same as voice) |
+| `/join` | Join your voice channel and start listening |
+| `/pause` | Toggle pause / resume |
+| `/volume [1-10]` | Show or set volume |
+| `/skip`, `/stop`, `/queue` | Skip, stop+clear, show queue |
+
+**By voice:** `/join`, then say e.g. *"Марина, включи что-нибудь бодрое"*,
+*"Марина, поставь на паузу"*, *"Марина, сделай погромче"*, *"Марина, что в очереди?"*.
+
+## Environment
+
+See [`.env.example`](.env.example) for the full list. Key ones: `DISCORD_TOKEN`,
+`AI_SERVICE_ADDR`, `SEARCH_SERVICE_ADDR`, `WHISPER_SERVER_ADDR`, `VOSK_SERVER_ADDR`,
+`STT_VOSK_ONLY`, `STT_LOG_LEVEL`, `AI_DEBUG`, `DJ_BREAK_EVERY`.
+
+## Notes
+
+- **Vendored discordgo** (`third_party/discordgo`): Discord mandates the DAVE E2EE
+  protocol on voice since 2026-03-02, so upstream can't connect. This is a patched fork
+  with DAVE send **and** receive (the bot decrypts other users' audio to transcribe it).
+- Editing `third_party/` forces a full rebuild; otherwise incremental builds are ~0.4s.
+- See [`CLAUDE.md`](CLAUDE.md) for architecture details and known gotchas.
