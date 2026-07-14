@@ -26,12 +26,12 @@ services.
 
 ## Services
 
-| Component | Default addr | Role |
-|---|---|---|
-| **DiscordAiService** | `http://127.0.0.1:8000` | `POST /agent` (decisions), `POST /tts` (Piper) |
-| **DsBotSearchService** | `http://127.0.0.1:9000` | `/search`, `/stream`, `/playlist` |
-| **whisper** (STT) | `http://127.0.0.1:9010` | `onerahmet/openai-whisper-asr-webservice` |
-| **Vosk** (wake word) | `ws://127.0.0.1:2700` | `alphacep/kaldi-ru` |
+| Component                                                                   | Default addr | Role |
+|-----------------------------------------------------------------------------|---|---|
+| **[DiscordAiService](https://github.com/IlyaGoloborodko/DiscordAiService)** | `http://127.0.0.1:8000` | `POST /agent` (decisions), `POST /tts` (Piper) |
+| **[media-source-service](https://github.com/IlyaGoloborodko/media-source-service)**                                                | `http://127.0.0.1:9000` | `/search`, `/stream`, `/playlist` |
+| **whisper** (STT)                                                           | `http://127.0.0.1:9010` | `onerahmet/openai-whisper-asr-webservice` |
+| **Vosk** (wake word)                                                        | `ws://127.0.0.1:2700` | `alphacep/kaldi-ru` |
 
 ## Prerequisites
 
