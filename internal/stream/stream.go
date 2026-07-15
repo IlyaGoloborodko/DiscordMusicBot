@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -17,11 +18,59 @@ import (
 )
 
 // Controls lets the caller adjust playback live: gain (0..1 volume multiplier,
-// used for ducking) and paused (hold playback without losing position). Either
-// callback may be nil, meaning full volume / never paused.
+// used for ducking), paused (hold playback without losing position) and overlay
+// (a second PCM source mixed on top, e.g. the assistant talking over the music).
+// Any callback may be nil.
 type Controls struct {
 	Gain   func() float64 // volume multiplier applied per frame; nil => 1.0
 	Paused func() bool    // when true, stop sending frames until it clears; nil => never
+	// Overlay returns up to n samples of 48kHz-stereo PCM to mix into the next
+	// frame, or nil when there is nothing to overlay. Mixed after Gain, so the
+	// overlay stays at full volume while the music underneath is ducked.
+	Overlay func(n int) []int16
+}
+
+// TranscodePCM decodes an audio stream (raw s16le at the given rate/channels)
+// into 48kHz-stereo PCM held in memory — used to prepare a TTS clip for mixing.
+func TranscodePCM(ctx context.Context, audio io.Reader, sampleRate, channels int) ([]int16, error) {
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-f", "s16le",
+		"-ar", strconv.Itoa(sampleRate),
+		"-ac", strconv.Itoa(channels),
+		"-i", "pipe:0",
+		"-f", "s16le",
+		"-ar", "48000",
+		"-ac", "2",
+		"pipe:1",
+	)
+	cmd.Stdin = audio
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg transcode: %w; stderr: %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	pcm := make([]int16, len(out)/2)
+	for i := range pcm {
+		pcm[i] = int16(binary.LittleEndian.Uint16(out[i*2:]))
+	}
+	return pcm, nil
+}
+
+// mixSample adds two samples with saturation, so the ducked music plus the
+// assistant's voice can't wrap around into distortion.
+func mixSample(a, b int16) int16 {
+	v := int32(a) + int32(b)
+	if v > math.MaxInt16 {
+		return math.MaxInt16
+	}
+	if v < math.MinInt16 {
+		return math.MinInt16
+	}
+	return int16(v)
 }
 
 // StartStreaming plays an audio URL into the voice connection until it ends or
@@ -119,6 +168,14 @@ func startFFmpegStreaming(ctx context.Context, vc *discordgo.VoiceConnection, cm
 				if g := ctrl.Gain(); g < 0.999 {
 					for i := range pcmBuf {
 						pcmBuf[i] = int16(float64(pcmBuf[i]) * g)
+					}
+				}
+			}
+			// Overlay: mix the assistant's voice on top of the ducked music.
+			if ctrl.Overlay != nil {
+				if ov := ctrl.Overlay(len(pcmBuf)); len(ov) > 0 {
+					for i := 0; i < len(ov) && i < len(pcmBuf); i++ {
+						pcmBuf[i] = mixSample(pcmBuf[i], ov[i])
 					}
 				}
 			}

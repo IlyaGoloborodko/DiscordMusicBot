@@ -60,6 +60,44 @@ type snapshot struct {
 	queue      []string
 }
 
+// overlayBuf holds a 48kHz-stereo PCM clip that the music stream drains frame by
+// frame and mixes on top of itself, so the assistant can talk over the music.
+type overlayBuf struct {
+	mu  sync.Mutex
+	pcm []int16
+	pos int
+}
+
+func (o *overlayBuf) set(pcm []int16) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.pcm, o.pos = pcm, 0
+}
+
+func (o *overlayBuf) clear() { o.set(nil) }
+
+// take returns up to n samples, advancing the read position; nil when drained.
+func (o *overlayBuf) take(n int) []int16 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.pos >= len(o.pcm) {
+		return nil
+	}
+	end := o.pos + n
+	if end > len(o.pcm) {
+		end = len(o.pcm)
+	}
+	out := o.pcm[o.pos:end]
+	o.pos = end
+	return out
+}
+
+func (o *overlayBuf) drained() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.pos >= len(o.pcm)
+}
+
 type command struct {
 	kind          cmdKind
 	speak         string
@@ -101,9 +139,11 @@ type Player struct {
 	done  chan struct{}
 
 	// Live playback controls, read by the streaming goroutine.
-	duckDepth atomic.Int32 // >0 while the AI is thinking -> music is ducked
-	paused    atomic.Bool  // playback held (position preserved)
-	volume    atomic.Int32 // 1-10 user volume level
+	duckDepth    atomic.Int32 // >0 while the AI is thinking -> music is ducked
+	paused       atomic.Bool  // playback held (position preserved)
+	volume       atomic.Int32 // 1-10 user volume level
+	musicPlaying atomic.Bool  // a track is streaming right now (so we can talk over it)
+	overlay      overlayBuf   // assistant voice mixed on top of the music
 
 	// binding (vc/channel) can change on rejoin -> guarded.
 	bmu       sync.RWMutex
@@ -372,7 +412,13 @@ func (p *Player) applyAgent(c command) {
 		p.SetPaused(false)
 	}
 	if s := strings.TrimSpace(c.speak); s != "" {
-		p.pending = append(p.pending, s)
+		if p.musicPlaying.Load() {
+			// Answer right away, mixed over the ducked music.
+			go p.speakOver(s)
+		} else {
+			// Nothing playing: speak it on the loop as usual.
+			p.pending = append(p.pending, s)
+		}
 	}
 	// Announce the display text, falling back to the clarification question when
 	// there is no display text (in tool-calling mode a question arrives with no
@@ -390,12 +436,61 @@ func (p *Player) applyAgent(c command) {
 // loop stays responsive to commands. They return a preempting command if one
 // arrived, or nil if the item finished on its own.
 func (p *Player) playURL(url string) *command {
+	// While a track streams, spoken answers are mixed over it instead of queued.
+	p.musicPlaying.Store(true)
+	defer func() {
+		p.musicPlaying.Store(false)
+		p.overlay.clear()
+	}()
+
 	return p.playItem(func(ctx context.Context) error {
 		return stream.StartStreaming(ctx, p.conn(), url, stream.Controls{
-			Gain:   p.gain,
-			Paused: p.isPaused,
+			Gain:    p.gain,
+			Paused:  p.isPaused,
+			Overlay: p.overlay.take,
 		})
 	})
+}
+
+// speakOver plays a spoken line on top of the currently playing music: the clip
+// is fetched and transcoded up front, the music ducks, and the stream loop mixes
+// the clip in frame by frame. Runs off the player loop, so the music keeps going.
+func (p *Player) speakOver(text string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	audio, err := p.ai.Tts(ctx, text)
+	if err != nil {
+		logger.Send(fmt.Sprintf("tts error (guild %s): %v", p.guildID, err))
+		return
+	}
+	defer audio.Close()
+
+	pcm, err := stream.TranscodePCM(ctx, audio, ttsSampleRate, ttsChannels)
+	if err != nil {
+		logger.Send(fmt.Sprintf("tts transcode error (guild %s): %v", p.guildID, err))
+		return
+	}
+	if len(pcm) == 0 || !p.musicPlaying.Load() {
+		return
+	}
+
+	p.Duck()
+	defer p.Unduck()
+	p.overlay.set(pcm)
+	defer p.overlay.clear()
+
+	// Wait until the stream has mixed the whole clip in (or the music stopped).
+	for !p.overlay.drained() {
+		if !p.musicPlaying.Load() {
+			return
+		}
+		select {
+		case <-p.done:
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func (p *Player) playTTS(text string) *command {

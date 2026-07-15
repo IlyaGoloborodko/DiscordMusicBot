@@ -77,6 +77,15 @@ controls read by the stream loop: `duckDepth` (ducking while AI thinks, ×0.25),
 play/replace/skip/stop preempt the current track; enqueue/pause/resume/volume/none keep
 it playing.
 
+**Talking over the music (overlay mixing).** `spoken_answer` used to go to `p.pending`,
+which the loop only plays *between* tracks — so answers waited for the current track to
+end. Now: if `musicPlaying` is set, `applyAgent` spawns `speakOver()`, which fetches the
+TTS, transcodes it to 48k stereo in memory (`stream.TranscodePCM`), ducks the music and
+hands the clip to `overlayBuf`. The stream loop drains it frame by frame and mixes it
+over the (already gain-reduced) music with saturating adds — so the assistant is heard
+immediately at full volume over quiet music. With nothing playing, the old `pending`
+path is used.
+
 ## KNOWN GOTCHAS
 - **AI session-memory poisoning** (biggest live issue): the AI service keeps
   conversation memory per guild/channel. If it once returns bad output (English canned
