@@ -29,9 +29,11 @@ const (
 	maxVolume     = 10
 )
 
-// TTS stream format produced by the AI service /tts endpoint.
+// TTS stream format produced by the AI service /tts endpoint: raw headerless
+// s16le PCM. OpenAI (gpt-4o-mini-tts, TTS_FORMAT=pcm) emits 24kHz mono; the old
+// Piper voice was 22050. Must match the service or playback shifts in pitch/speed.
 const (
-	ttsSampleRate = 22050
+	ttsSampleRate = 24000
 	ttsChannels   = 1
 )
 
