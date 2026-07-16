@@ -70,7 +70,7 @@ func main() {
 		log.Fatal("DISCORD_TOKEN not set")
 	}
 
-	config.DebugGuildID = os.Getenv("DEBUG_GUIID")
+	config.DebugGuildIDs = os.Getenv("DEBUG_GUIID")
 
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {

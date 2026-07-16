@@ -17,6 +17,12 @@ and `...\DsBotSearchService`.
 
 ## Env vars
 - `AI_SERVICE_ADDR`, `AI_SERVICE_API_KEY`, `SEARCH_SERVICE_ADDR` — service endpoints.
+- `DEBUG_GUIID` — comma-separated guild IDs to register slash commands in; **empty ⇒
+  global** (every server, but up to an hour to propagate). Guild commands are instant,
+  which is why it's the dev setting — but they exist only there, so a bot on a second
+  server joins voice and shows no commands. `config.CommandGuildIDs()` maps empty to
+  `[]string{""}` because discordgo reads an empty guild id as "global"; returning an
+  empty slice instead would register nothing anywhere (`config/consts_test.go`).
 - `OPENAI_API_KEY` — **selects the command STT backend**: set ⇒ OpenAI, empty ⇒ local
   whisper at `WHISPER_SERVER_ADDR`. `OPENAI_STT_MODEL` defaults to
   `gpt-4o-mini-transcribe` (~5.3% WER ru, $0.003/min, 0.5-1.5s vs 4s+ for local CPU

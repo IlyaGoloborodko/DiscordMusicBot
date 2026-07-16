@@ -5,6 +5,7 @@ import (
 	"discordAudio/internal/logger"
 	"discordAudio/internal/voice"
 	"fmt"
+	"log"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -127,29 +128,35 @@ var (
 	}
 )
 
-var serverGuiid string
-
+// RegisterCommands publishes the slash commands, either into the guilds named by
+// DEBUG_GUIID or globally when it is empty. See config.CommandGuildIDs.
 func RegisterCommands(s *discordgo.Session) error {
-	if config.Debug {
-		serverGuiid = config.DebugGuildID
-	} else {
-		serverGuiid = ""
-	}
+	guilds := config.CommandGuildIDs()
 
-	RegisteredCommands = make([]*discordgo.ApplicationCommand, len(commands))
-	for i, v := range commands {
-		cmd, err := s.ApplicationCommandCreate(s.State.User.ID, serverGuiid, v)
-		if err != nil {
-			logger.Send(fmt.Sprintf("Cannot create '%v' command: %v", v.Name, err))
-		}
-		RegisteredCommands[i] = cmd
-	}
-	if !config.SupportCommands {
-		for _, v := range RegisteredCommands {
-			if v == nil {
+	RegisteredCommands = nil
+	for _, guildID := range guilds {
+		for _, v := range commands {
+			cmd, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, v)
+			if err != nil {
+				logger.Send(fmt.Sprintf("Cannot create '%v' command in guild %q: %v", v.Name, guildID, err))
 				continue
 			}
-			err := s.ApplicationCommandDelete(s.State.User.ID, serverGuiid, v.ID)
+			RegisteredCommands = append(RegisteredCommands, cmd)
+		}
+	}
+
+	if guilds[0] == "" {
+		log.Printf("[discord] registered %d commands globally (Discord may take up to an hour to show them on every server)", len(RegisteredCommands))
+	} else {
+		log.Printf("[discord] registered %d commands in guilds %v — they exist ONLY there; clear DEBUG_GUIID to publish everywhere", len(RegisteredCommands), guilds)
+	}
+
+	if !config.SupportCommands {
+		// Delete each command from the guild it was created in — a single shared
+		// guild id would aim the deletes at the wrong server once there is more
+		// than one.
+		for _, v := range RegisteredCommands {
+			err := s.ApplicationCommandDelete(s.State.User.ID, v.GuildID, v.ID)
 			if err != nil {
 				logger.Send(fmt.Sprintf("Cannot delete '%v' command: %v", v.Name, err))
 			}
