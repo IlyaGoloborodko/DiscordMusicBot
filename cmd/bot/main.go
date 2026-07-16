@@ -19,8 +19,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// initEnv loads .env and lets it win over variables already in the environment.
+// Overload, not Load: Load leaves pre-existing variables alone, so a stale
+// machine-wide value silently beats the file you just edited — a Windows User-level
+// OPENAI_API_KEY shadowed the .env one and every request came back 401 with a key
+// that appeared nowhere in the repo.
 func initEnv() {
-	if err := godotenv.Load(); err != nil {
+	if err := godotenv.Overload(); err != nil {
 		log.Println(".env file not found, using system environment variables")
 	}
 }

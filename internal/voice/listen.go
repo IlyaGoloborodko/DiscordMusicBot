@@ -24,9 +24,16 @@ const (
 	maxSegmentSamples = recvSampleRate * recvChannels * 10     // ~10s hard cap
 	minSegmentSamples = recvSampleRate * recvChannels * 4 / 10 // ~0.4s floor (skip noise)
 
-	// Speech gate, applied to the trimmed 16kHz-mono clip before whisper.
-	minSpeechSamples = sttSampleRate * 3 / 10 // ~0.3s of audible content
-	minSpeechRMS     = 250                    // skip quiet/near-silent clips
+	// Silence floor, applied to the 16kHz-mono clip. Deliberately permissive: it
+	// only rejects digital silence so we don't spend a Vosk call on it. A strict
+	// gate here is worse than a useless one — it drops a quiet speaker's whole
+	// utterance and the bot just never answers.
+	minSpeechRMS = 40
+
+	// wakeOnlyMs: an utterance no longer than this is treated as "just the wake
+	// word" when Vosk decodes nothing after it — too short to hold a command.
+	// Anything longer is sent to whisper even if Vosk heard only "Марина".
+	wakeOnlyMs = 1200
 
 	// wakeFollowupWindow: after hearing the wake word alone, keep listening this
 	// long for the command in the following segment(s).
@@ -151,16 +158,14 @@ func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
 func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, userID string, ssrc uint32) {
 	lvl := sttLogLevel()
 
-	// 48k stereo -> 16k mono, then drop leading/trailing silence so the models
-	// aren't fed the up-to-3s pause (the main hallucination trigger).
+	// Vosk's websocket protocol wants 16kHz mono, so downmix for the gate only.
+	// Whisper gets the original 48k stereo — resampling is the server's job.
 	mono := downmixTo16kMono(pcm)
-	speech := trimSilence(mono)
-	speechMs := len(speech) * 1000 / sttSampleRate
+	speechMs := len(mono) * 1000 / sttSampleRate
 
-	// Skip segments with no real speech (silence/noise).
-	if len(speech) < minSpeechSamples || rms(speech) < minSpeechRMS {
+	if level := rms(mono); level < minSpeechRMS {
 		if lvl >= sttLogAll {
-			log.Printf("[stt] user=%s SKIP gate (speechMs=%d rms=%.0f)", userID, speechMs, rms(speech))
+			log.Printf("[stt] user=%s SKIP silence (speechMs=%d rms=%.0f)", userID, speechMs, level)
 		}
 		return
 	}
@@ -174,7 +179,7 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 	// Without a Vosk gate: run whisper on every segment and look for the wake word
 	// in its output (original behavior).
 	if voskServerAddr() == "" {
-		raw, err := transcribe(ctx, speech)
+		raw, err := transcribe(ctx, pcm)
 		if err != nil {
 			if lvl >= sttLogCommands {
 				log.Println("[stt] whisper error:", err)
@@ -196,7 +201,7 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 
 	// With a Vosk gate: cheap wake-word detection first, heavy whisper only for
 	// the command.
-	gate, err := voskTranscribe(ctx, speech)
+	gate, err := voskTranscribe(ctx, mono)
 	if err != nil {
 		if lvl >= sttLogCommands {
 			log.Println("[stt] vosk error:", err)
@@ -209,20 +214,26 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 		log.Printf("[stt] user=%s speechMs=%d VOSK=%q wake=%v armed=%v", userID, speechMs, gate, wake, armed)
 	}
 
-	switch {
-	case wake && voskCmd == "":
+	// Vosk decoded nothing after the wake word. That means "the user only said the
+	// name" *only* when the utterance is too short to have held a command, or when
+	// Vosk is all we have. Otherwise the segment goes to whisper anyway: the small
+	// model gates on whether the name was spoken, and must not veto the big model
+	// on what followed — mishearing the command is exactly what it's bad at, and
+	// discarding the audio here is why commands seemed to vanish.
+	if wake && voskCmd == "" && (voskOnly() || speechMs <= wakeOnlyMs) {
 		// Only the wake word this segment -> listen for the command next (<=10s).
 		l.arm(ssrc)
 		if lvl >= sttLogCommands {
 			log.Printf("[stt] user=%s wake word heard, waiting for command", userID)
 		}
 		return
-	case wake || armed:
-		// Command present: same segment as the wake word, or the armed follow-up.
-		l.disarm(ssrc)
-	default:
+	}
+
+	if !wake && !armed {
 		return // no wake, not armed -> command model not run
 	}
+	// Command present: same segment as the wake word, or the armed follow-up.
+	l.disarm(ssrc)
 
 	// Vosk-only: use the wake-word pass's own transcript as the command (no
 	// whisper). Better at Russian, just without punctuation. Full text incl. the
@@ -240,7 +251,7 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 
 	// Otherwise transcribe the command with the main whisper model; the full text
 	// (wake word included) goes to the AI.
-	raw, err := transcribe(ctx, speech)
+	raw, err := transcribe(ctx, pcm)
 	if err != nil {
 		if lvl >= sttLogCommands {
 			log.Println("[stt] whisper error:", err)

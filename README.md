@@ -9,8 +9,8 @@ the wake word **"Марина"** followed by a request, and an AI agent decides 
 Music reaches the queue two ways:
 
 ```
-Voice / AI:  Discord voice ─► bot ─► Vosk (wake word) ─► whisper ─► AI agent (/agent, tools)
-                                                                         └─► returns tracks
+Voice / AI:  Discord voice ─► bot ─► Vosk (wake word, local) ─► OpenAI STT ─► AI agent (/agent, tools)
+                                                                                  └─► returns tracks
 Direct:      /play ─► bot ─► search service (/search)  ─► tracks
 
 Then for every queued track:
@@ -20,9 +20,9 @@ Then for every queued track:
 
 The bot talks to the **search service directly** — for `/play` (search) and to resolve
 the stream URL of every track before playback — and to the **AI agent** for voice /
-`/prompt` requests (the agent runs its own search and returns tracks). Speech recognition
-runs locally (Vosk + whisper containers); the AI agent and search are separate Python
-services.
+`/prompt` requests (the agent runs its own search and returns tracks). The **wake-word
+gate runs locally** (Vosk), so only utterances that start with "Марина" are sent to the
+command STT; the AI agent and search are separate Python services.
 
 ## Services
 
@@ -30,8 +30,9 @@ services.
 |-----------------------------------------------------------------------------|---|---|
 | **[DiscordAiService](https://github.com/IlyaGoloborodko/DiscordAiService)** | `http://127.0.0.1:8000` | `POST /agent` (decisions), `POST /tts` (Piper) |
 | **[media-source-service](https://github.com/IlyaGoloborodko/media-source-service)**                                                | `http://127.0.0.1:9000` | `/search`, `/stream`, `/playlist` |
-| **whisper** (STT)                                                           | `http://127.0.0.1:9010` | `onerahmet/openai-whisper-asr-webservice` |
-| **Vosk** (wake word)                                                        | `ws://127.0.0.1:2700` | `alphacep/kaldi-ru` |
+| **OpenAI** (command STT)                                                    | cloud | `gpt-4o-mini-transcribe`, set `OPENAI_API_KEY` |
+| **whisper** (STT fallback)                                                  | `http://127.0.0.1:9010` | `onerahmet/openai-whisper-asr-webservice`, only when `OPENAI_API_KEY` is empty |
+| **Vosk** (wake word)                                                        | `ws://127.0.0.1:2700` | `alphacep/kaldi-ru`, always local |
 
 ## Prerequisites
 

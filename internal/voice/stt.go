@@ -10,8 +10,11 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	neturl "net/url"
 	"os"
+	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -68,10 +71,28 @@ func voskServerAddr() string {
 }
 
 // voskOnly reports whether Vosk should also produce the command text (skipping
-// whisper entirely). Enabled with STT_VOSK_ONLY=1/true.
+// the command model entirely). Enabled with STT_VOSK_ONLY=1/true. This is a
+// fallback: Vosk's small model is a wake-word gate, and leaning on it for the
+// command text is why recognition felt broken.
 func voskOnly() bool {
 	v := strings.TrimSpace(os.Getenv("STT_VOSK_ONLY"))
 	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// openaiKey enables the OpenAI transcription backend when set. Only utterances
+// the local Vosk gate already accepted (i.e. someone said "Марина") are ever
+// sent off the machine — the gate bounds both the bill and what leaves the box.
+func openaiKey() string {
+	return strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+}
+
+// openaiSTTModel overrides the transcription model via OPENAI_STT_MODEL.
+// gpt-4o-mini-transcribe: ~5.3% WER on Russian (FLEURS), $0.003/min.
+func openaiSTTModel() string {
+	if m := strings.TrimSpace(os.Getenv("OPENAI_STT_MODEL")); m != "" {
+		return m
+	}
+	return "gpt-4o-mini-transcribe"
 }
 
 // voskTranscribe runs the small Vosk model over the clip via its websocket API
@@ -179,17 +200,134 @@ func stripWakeWord(text string) (command string, ok bool) {
 	return "", false
 }
 
-// transcribe turns 16kHz-mono PCM into text by posting it to the whisper HTTP
-// service (onerahmet/openai-whisper-asr-webservice): POST /asr with the WAV as
-// the "audio_file" multipart field; output=txt returns the plain transcript.
-// encode=false because we already send 16kHz-mono WAV (skips server-side ffmpeg).
-func transcribe(ctx context.Context, mono []int16) (string, error) {
+// whisperPrompt biases the decoder toward this bot's vocabulary — the wake word
+// and the words used to control playback. Whisper only consumes the last 224
+// tokens of the prompt and weighs later tokens more, so keep it short and put
+// the domain words at the end. This is contextual biasing: it buys most of what
+// "training the model on our keywords" would, for free and at inference time.
+const whisperPrompt = "Разговор с ботом Мариной. Марина, включи музыку. Марина, поставь на паузу. " +
+	"Марина, продолжи. Марина, сделай погромче. Марина, потише. Марина, пропусти трек. " +
+	"Марина, что в очереди? Марина, останови."
+
+// transcribe turns a captured utterance (48kHz stereo PCM) into text using
+// whichever command model is configured: OpenAI when OPENAI_API_KEY is set,
+// otherwise the local whisper HTTP service.
+func transcribe(ctx context.Context, pcm []int16) (string, error) {
+	if openaiKey() != "" {
+		return openaiTranscribe(ctx, pcm)
+	}
+	return whisperTranscribe(ctx, pcm)
+}
+
+// toFLAC16kMono re-encodes the captured 48k stereo PCM as 16kHz mono FLAC via
+// ffmpeg. Two reasons: ffmpeg resamples properly (our own decimator aliased the
+// fricative band), and FLAC is lossless but roughly an order of magnitude
+// smaller than the raw WAV — the upload is on the critical path for latency.
+func toFLAC16kMono(ctx context.Context, pcm []int16) ([]byte, error) {
+	raw := make([]byte, len(pcm)*2)
+	for i, s := range pcm {
+		binary.LittleEndian.PutUint16(raw[i*2:], uint16(s))
+	}
+
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-f", "s16le",
+		"-ar", strconv.Itoa(recvSampleRate),
+		"-ac", strconv.Itoa(recvChannels),
+		"-i", "pipe:0",
+		"-ar", strconv.Itoa(sttSampleRate),
+		"-ac", "1",
+		"-f", "flac",
+		"pipe:1",
+	)
+	cmd.Stdin = bytes.NewReader(raw)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg flac: %w; stderr: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return out, nil
+}
+
+// openaiTranscribe posts the utterance to OpenAI's transcription API. The prompt
+// carries the same contextual biasing as the local backend.
+func openaiTranscribe(ctx context.Context, pcm []int16) (string, error) {
+	audio, err := toFLAC16kMono(ctx, pcm)
+	if err != nil {
+		return "", err
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", "utt.flac")
+	if err != nil {
+		return "", err
+	}
+	if _, err := part.Write(audio); err != nil {
+		return "", err
+	}
+	for field, value := range map[string]string{
+		"model":           openaiSTTModel(),
+		"language":        "ru",
+		"prompt":          whisperPrompt,
+		"response_format": "text",
+	} {
+		if err := mw.WriteField(field, value); err != nil {
+			return "", err
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.openai.com/v1/audio/transcriptions", &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+openaiKey())
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("openai stt request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("openai stt %s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+	return cleanWhisperOutput(string(out)), nil
+}
+
+// whisperTranscribe turns 48kHz-stereo PCM into text by posting it to the local
+// whisper HTTP service (onerahmet/openai-whisper-asr-webservice): POST /asr with
+// the WAV as the "audio_file" multipart field; output=txt returns the transcript.
+//
+// We hand over the original 48k stereo and let the server's ffmpeg resample
+// (encode=true). Doing it ourselves needed a cheap decimating filter that both
+// rolled off the 8kHz band (~-7dB) and aliased 9-14kHz back onto 2-7kHz at only
+// -12..-19dB — exactly where the fricatives live.
+//
+// vad_filter lets faster_whisper drop non-speech itself, which replaces the
+// amplitude-threshold trimming we used to do (that shaved the quiet onsets off
+// words and dropped whole clips from quiet mics). It is NOT optional while an
+// initial_prompt is set: measured on this container, silence and noise with
+// vad_filter=false come back as the prompt text echoed verbatim, which would
+// hand the AI a phantom command. With vad_filter=true both return empty.
+func whisperTranscribe(ctx context.Context, pcm []int16) (string, error) {
 	addr := whisperServerAddr()
 	if addr == "" {
 		return "", fmt.Errorf("WHISPER_SERVER_ADDR is not set")
 	}
 
-	wav := pcmToWAV(mono, sttSampleRate, 1)
+	wav := pcmToWAV(pcm, recvSampleRate, recvChannels)
 
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -204,7 +342,15 @@ func transcribe(ctx context.Context, mono []int16) (string, error) {
 		return "", err
 	}
 
-	url := strings.TrimRight(addr, "/") + "/asr?task=transcribe&language=ru&output=txt&encode=false"
+	q := neturl.Values{
+		"task":           {"transcribe"},
+		"language":       {"ru"},
+		"output":         {"txt"},
+		"encode":         {"true"},
+		"vad_filter":     {"true"},
+		"initial_prompt": {whisperPrompt},
+	}
+	url := strings.TrimRight(addr, "/") + "/asr?" + q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
 	if err != nil {
 		return "", err
@@ -249,36 +395,14 @@ func rms(pcm []int16) float64 {
 	return math.Sqrt(sum / float64(len(pcm)))
 }
 
-// trimSilence keeps only the region around audible content (drops leading/trailing
-// silence — e.g. the up-to-3s pause we wait for — so whisper doesn't hallucinate
-// on silence). Returns nil if nothing is above the amplitude threshold.
-func trimSilence(mono []int16) []int16 {
-	const amp = 350     // int16 amplitude considered "speech"
-	const margin = 1600 // ~0.1s @16k kept around speech
-
-	first, last := -1, -1
-	for i, s := range mono {
-		if s < 0 {
-			s = -s
-		}
-		if int(s) > amp {
-			if first < 0 {
-				first = i
-			}
-			last = i
-		}
-	}
-	if first < 0 {
-		return nil
-	}
-	if first -= margin; first < 0 {
-		first = 0
-	}
-	if last += margin; last > len(mono) {
-		last = len(mono)
-	}
-	return mono[first:last]
-}
+// NOTE: there used to be a trimSilence() here that cut the clip down to the
+// region above a fixed int16 amplitude (350). It is gone on purpose. Unvoiced
+// consonants (с, ш, ф, х, ц) are inherently low-amplitude, so a flat threshold
+// ate the starts and ends of words, and on a quiet mic the companion RMS gate
+// discarded whole utterances. Benchmarks on real Russian audio show this kind of
+// preprocessing (VAD-cut, AGC) costs 6-9 points of WER, because the models are
+// trained on unprocessed audio. Silence is now handled by the server's
+// vad_filter instead, and the gate below only rejects digital silence.
 
 var (
 	reBracket = regexp.MustCompile(`\[[^\]]*\]`)
@@ -286,11 +410,18 @@ var (
 	reStar    = regexp.MustCompile(`\*[^*]*\*`)
 	reSpaces  = regexp.MustCompile(`\s+`)
 
-	// Substrings that mark a whisper hallucination (YouTube-subtitle artifacts).
+	// Substrings that mark a hallucination rather than something a user said.
 	hallucinationMarkers = []string{
+		// YouTube-subtitle artifacts baked into whisper's training data.
 		"редактор субтитров", "корректор", "субтитры",
 		"подпишись", "продолжение следует", "спасибо за просмотр",
 		"ставьте лайк", "amara", "dimatorzok",
+		// Prompt echo: fed non-speech, the model parrots initial_prompt back as
+		// the transcript. whisperPrompt opens with this framing sentence exactly
+		// so the echo is recognisable and no real user would ever utter it. The
+		// local backend has vad_filter to prevent this; the OpenAI API has no
+		// such knob, so this is the defence there.
+		"разговор с ботом мариной",
 	}
 )
 
