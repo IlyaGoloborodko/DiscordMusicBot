@@ -18,6 +18,21 @@ func PlayerTools() []Tool {
 	}
 	noArgs := map[string]any{"type": "object", "properties": map[string]any{}}
 
+	// The scale is advisory here — the player clamps whatever arrives, so a bad
+	// level costs nothing. Keep it in step with the player's minVolume/maxVolume.
+	levelArg := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"level": map[string]any{
+				"type":        "integer",
+				"minimum":     1,
+				"maximum":     10,
+				"description": "The exact level the user asked for, as they said it.",
+			},
+		},
+		"required": []string{"level"},
+	}
+
 	return []Tool{
 		{Name: ActionPlay, Description: "Play these tracks now, ahead of the current queue.", InputSchema: tracksArg},
 		{Name: ActionEnqueue, Description: "Append these tracks to the end of the queue.", InputSchema: tracksArg},
@@ -26,8 +41,9 @@ func PlayerTools() []Tool {
 		{Name: ActionResume, Description: "Resume paused playback.", InputSchema: noArgs},
 		{Name: ActionSkip, Description: "Skip the current track.", InputSchema: noArgs},
 		{Name: ActionStop, Description: "Stop playback and clear the queue.", InputSchema: noArgs},
-		{Name: ActionVolumeUp, Description: "Turn the volume up by one step (louder).", InputSchema: noArgs},
-		{Name: ActionVolumeDown, Description: "Turn the volume down by one step (quieter).", InputSchema: noArgs},
+		{Name: ActionVolumeUp, Description: "Turn the volume up by one step (louder). Use for relative requests (\"погромче\", \"сделай громче\"). Do not work out the resulting level — the bot does that.", InputSchema: noArgs},
+		{Name: ActionVolumeDown, Description: "Turn the volume down by one step (quieter). Use for relative requests (\"потише\", \"тише\"). Do not work out the resulting level — the bot does that.", InputSchema: noArgs},
+		{Name: ActionSetVolume, Description: "Set the volume to an exact level on a 1-10 scale. Use ONLY when the user names the number themselves (\"поставь громкость на 6\", \"громкость 8\"): pass that number through unchanged. For \"louder\"/\"quieter\", and for \"тише на два\", use volume_up/volume_down instead — never calculate a level yourself.", InputSchema: levelArg},
 	}
 }
 

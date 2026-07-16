@@ -14,6 +14,7 @@ const (
 	ActionStop         = "stop"
 	ActionVolumeUp     = "volume_up"
 	ActionVolumeDown   = "volume_down"
+	ActionSetVolume    = "set_volume"
 	ActionClarify      = "clarify"
 	ActionNone         = "none"
 )
@@ -70,8 +71,13 @@ type AgentResponse struct {
 }
 
 // VolumeDelta returns +1/-1 if the agent asked to raise/lower the volume by one
-// step, or 0 if no volume tool was called. Applied independently of the
+// step, or 0 if no relative volume tool was called. Applied independently of the
 // queue/transport action.
+//
+// Relative changes are a delta on purpose: the agent used to be asked for the
+// resulting level and got the arithmetic wrong (it answered 6 for "потише" from
+// 5, and 8 for "тише на 2" from 5). The bot does the sums; the agent only names
+// a direction. See VolumeLevel for the case where the *user* names the number.
 func (r *AgentResponse) VolumeDelta() int {
 	for _, tc := range r.ToolCalls {
 		switch tc.Name {
@@ -82,6 +88,27 @@ func (r *AgentResponse) VolumeDelta() int {
 		}
 	}
 	return 0
+}
+
+// VolumeLevel returns the exact level the agent was told to set, and ok=false if
+// set_volume wasn't called. Unlike a relative change this asks nothing of the
+// agent's arithmetic — the user said the number out loud ("поставь громкость на
+// 6") and the agent just carries it across. The player clamps the result, so an
+// out-of-range level is harmless.
+func (r *AgentResponse) VolumeLevel() (level int, ok bool) {
+	for _, tc := range r.ToolCalls {
+		if tc.Name != ActionSetVolume {
+			continue
+		}
+		var a struct {
+			Level *int `json:"level"`
+		}
+		if err := json.Unmarshal(tc.Arguments, &a); err != nil || a.Level == nil {
+			continue // malformed call — treat as no volume request at all
+		}
+		return *a.Level, true
+	}
+	return 0, false
 }
 
 // PrimaryEffect reduces the response to the single queue/transport action the

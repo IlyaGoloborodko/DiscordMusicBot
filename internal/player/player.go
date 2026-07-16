@@ -267,8 +267,11 @@ func (p *Player) send(c command) {
 // the legacy action) to a single queue/transport effect.
 func (p *Player) ApplyAgent(r *aiService.AgentResponse) {
 	// Volume is an independent, atomic control — apply it directly (it takes
-	// effect on the currently playing stream within a frame).
-	if d := r.VolumeDelta(); d != 0 {
+	// effect on the currently playing stream within a frame). An exact level the
+	// user named wins over a relative step; SetVolume clamps either way.
+	if level, ok := r.VolumeLevel(); ok {
+		p.SetVolume(level)
+	} else if d := r.VolumeDelta(); d != 0 {
 		p.SetVolume(p.Volume() + d)
 	}
 	action, tracks := r.PrimaryEffect()
