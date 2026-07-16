@@ -38,6 +38,36 @@ var wakeWords = []string{
 	"marina", "marin",
 }
 
+// nearWakeWords is the LOOSE first stage, matched against the Vosk gate only.
+// It deliberately contains real words that are not the wake word: the big Vosk
+// model has an open vocabulary, and its language model prefers "машина" (common
+// noun) over "марина" (a name) on near-identical acoustics — that substitution
+// is exactly why the bot ignored people saying "Марина, как дела".
+//
+// Precision is explicitly NOT this list's job. Everything it nominates is
+// re-checked against the accurate transcript with containsWakeWord, so a false
+// alarm costs one transcription (~$0.0002) and never a wrong action. Keep this
+// list generous and the strict list above honest.
+//
+// Do not "fix" this by adding these words to wakeWords instead: "включи Машину
+// времени" would then wake the bot for real.
+var nearWakeWords = []string{
+	"мари", "машин", "малин", "морин", "марьин", "мурин",
+	"marin", "machin",
+}
+
+// containsNearWake reports whether the cheap gate heard anything close enough to
+// the wake word to be worth spending the accurate model on.
+func containsNearWake(text string) bool {
+	n := normalize(text)
+	for _, w := range nearWakeWords {
+		if strings.Contains(n, w) {
+			return true
+		}
+	}
+	return false
+}
+
 // STT log verbosity levels, selected via the STT_LOG_LEVEL env var.
 const (
 	sttLogSilent   = 0 // nothing

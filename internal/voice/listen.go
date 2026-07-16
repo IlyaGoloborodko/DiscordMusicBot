@@ -30,11 +30,6 @@ const (
 	// utterance and the bot just never answers.
 	minSpeechRMS = 40
 
-	// wakeOnlyMs: an utterance no longer than this is treated as "just the wake
-	// word" when Vosk decodes nothing after it — too short to hold a command.
-	// Anything longer is sent to whisper even if Vosk heard only "Марина".
-	wakeOnlyMs = 1200
-
 	// wakeFollowupWindow: after hearing the wake word alone, keep listening this
 	// long for the command in the following segment(s).
 	wakeFollowupWindow = 10 * time.Second
@@ -199,8 +194,10 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 		return
 	}
 
-	// With a Vosk gate: cheap wake-word detection first, heavy whisper only for
-	// the command.
+	// First stage: the cheap gate nominates segments. It is matched loosely on
+	// purpose — its open-vocabulary language model prefers "машина" over the name
+	// "марина", so demanding an exact hit here is what made the bot ignore people.
+	// It decides only "worth paying the good model for", never "act on this".
 	gate, err := voskTranscribe(ctx, mono)
 	if err != nil {
 		if lvl >= sttLogCommands {
@@ -208,59 +205,83 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 		}
 		return
 	}
-	voskCmd, wake := stripWakeWord(gate)
 	armed := l.isArmed(ssrc)
+	near := containsNearWake(gate)
 	if lvl >= sttLogAll {
-		log.Printf("[stt] user=%s speechMs=%d VOSK=%q wake=%v armed=%v", userID, speechMs, gate, wake, armed)
+		log.Printf("[stt] user=%s speechMs=%d VOSK=%q near=%v armed=%v", userID, speechMs, gate, near, armed)
+	}
+	if !near && !armed {
+		return // nothing like the name, and no command is expected -> stop here
 	}
 
-	// Vosk decoded nothing after the wake word. That means "the user only said the
-	// name" *only* when the utterance is too short to have held a command, or when
-	// Vosk is all we have. Otherwise the segment goes to whisper anyway: the small
-	// model gates on whether the name was spoken, and must not veto the big model
-	// on what followed — mishearing the command is exactly what it's bad at, and
-	// discarding the audio here is why commands seemed to vanish.
-	if wake && voskCmd == "" && (voskOnly() || speechMs <= wakeOnlyMs) {
-		// Only the wake word this segment -> listen for the command next (<=10s).
+	// Vosk-only: no stronger model to appeal to, so the gate's own strict reading
+	// is the verdict and the loose match above cannot be confirmed.
+	if voskOnly() {
+		l.applyVoskOnly(vc, userID, ssrc, gate, armed, lvl)
+		return
+	}
+
+	raw, err := transcribe(ctx, pcm)
+	if err != nil {
+		if lvl >= sttLogCommands {
+			log.Println("[stt] transcribe error:", err)
+		}
+		return
+	}
+	command := cleanTranscript(raw)
+	if lvl >= sttLogAll {
+		log.Printf("[stt] user=%s STT=%q command=%q", userID, raw, command)
+	}
+	if command == "" {
+		return
+	}
+
+	// Second stage: the accurate transcript decides. Everything the gate merely
+	// misheard as the name ("включи Машину времени") is rejected here, having cost
+	// one transcription and no wrong action. Skipped when armed — in a follow-up
+	// the name was said in the previous segment, so the command stands alone.
+	if !armed {
+		after, wake := stripWakeWord(command)
+		if !wake {
+			if lvl >= sttLogCommands {
+				log.Printf("[stt] user=%s gate false alarm: VOSK=%q -> STT=%q", userID, gate, command)
+			}
+			return
+		}
+		if after == "" {
+			// Just the name -> listen for the command in the next segment (<=10s).
+			l.arm(ssrc)
+			if lvl >= sttLogCommands {
+				log.Printf("[stt] user=%s wake word heard, waiting for command", userID)
+			}
+			return
+		}
+	}
+
+	l.disarm(ssrc)
+	l.handleAI(vc, userID, command)
+}
+
+// applyVoskOnly is the STT_VOSK_ONLY path: Vosk produces the command text itself,
+// so there is no accurate model to confirm the wake word with and the strict
+// match has to be trusted. Kept as a fallback for running without a command model.
+func (l *voiceListener) applyVoskOnly(vc *discordgo.VoiceConnection, userID string, ssrc uint32, gate string, armed bool, lvl int) {
+	voskCmd, wake := stripWakeWord(gate)
+	if !wake && !armed {
+		return
+	}
+	if wake && voskCmd == "" {
 		l.arm(ssrc)
 		if lvl >= sttLogCommands {
 			log.Printf("[stt] user=%s wake word heard, waiting for command", userID)
 		}
 		return
 	}
-
-	if !wake && !armed {
-		return // no wake, not armed -> command model not run
-	}
-	// Command present: same segment as the wake word, or the armed follow-up.
 	l.disarm(ssrc)
 
-	// Vosk-only: use the wake-word pass's own transcript as the command (no
-	// whisper). Better at Russian, just without punctuation. Full text incl. the
-	// wake word is sent to the AI.
-	if voskOnly() {
-		command := cleanTranscript(gate)
-		if lvl >= sttLogCommands {
-			log.Printf("[stt] user=%s VOSK command=%q", userID, command)
-		}
-		if command != "" {
-			l.handleAI(vc, userID, command)
-		}
-		return
-	}
-
-	// Otherwise transcribe the command with the main whisper model; the full text
-	// (wake word included) goes to the AI.
-	raw, err := transcribe(ctx, pcm)
-	if err != nil {
-		if lvl >= sttLogCommands {
-			log.Println("[stt] whisper error:", err)
-		}
-		return
-	}
-	command := cleanTranscript(raw)
-	if lvl >= sttLogAll {
-		log.Printf("[stt] user=%s WHISPER=%q command=%q", userID, raw, command)
+	command := cleanTranscript(gate)
+	if lvl >= sttLogCommands {
+		log.Printf("[stt] user=%s VOSK command=%q", userID, command)
 	}
 	if command != "" {
 		l.handleAI(vc, userID, command)

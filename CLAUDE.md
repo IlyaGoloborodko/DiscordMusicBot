@@ -66,12 +66,30 @@ rebuild (see below).
 3. Command text = Vosk (`STT_VOSK_ONLY`) or whisper. Full text incl. the wake word is
    sent to the AI.
 
-**The gate must not veto the command.** Vosk decides *only whether the name was spoken*.
-If it hears "Марина" but decodes nothing after it, the segment still goes to whisper
-whenever it is longer than `wakeOnlyMs` — mishearing the command is exactly what the small
-model is bad at, and dropping the audio there made commands silently vanish. It only
-"arms" and waits for a follow-up segment when the utterance was too short to hold a
-command, or when `STT_VOSK_ONLY` leaves no stronger model to appeal to.
+## The wake word is a two-stage cascade — don't collapse it
+The two stages have **opposite jobs**. Keep them that way; `stt_test.go` locks it down.
+
+1. **Vosk / `containsNearWake`** — high recall, low precision. It only decides "is this
+   worth paying the accurate model for". It matches `nearWakeWords`, which deliberately
+   includes **real words that are not the wake word** ("машина", "малина").
+2. **Accurate STT / `containsWakeWord`** — precision. It decides whether to act, using
+   `wakeWords`. Whatever stage 1 merely misheard is dropped here, having cost one
+   transcription (~$0.0002) and no wrong action. Skipped when `armed` (in a follow-up the
+   name was in the previous segment).
+
+**Why:** Vosk's big model has an open vocabulary, and its language model prefers "машина"
+(common noun) over "марина" (a name) on near-identical acoustics. Observed live:
+`VOSK="я машина как дела"` for "Марина, как дела" → the bot ignored the user. Demanding an
+exact hit from the cheap model is asking it for precision it does not have.
+
+**Two things that look like fixes and are not:**
+- *Adding "машина" to `wakeWords`.* Then "включи Машину времени" wakes the bot for real.
+  The loose list exists precisely so the confusions never reach the acting decision.
+- *Vosk `phrase_list` (closed grammar).* Measured, A/B, on `vosk-model-small-ru-0.22`
+  (dynamic graph — the shipped `alphacep/kaldi-ru` big model is static HCLG and rejects it
+  anyway): a restricted vocabulary **snaps everything to the nearest phrase**. "Моя машина
+  сломалась вчера" came back as `"марина марина [unk]"` and "Включи Машину времени" as
+  `"[unk] марина"` — constant false wakes. The big open-vocabulary model got both right.
 
 ## STT audio handling — what NOT to re-add
 Benchmarks on real Russian audio show VAD-cutting and AGC cost **6-9 points of WER**: the
