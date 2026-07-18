@@ -33,6 +33,11 @@ and `...\DsBotSearchService`.
   **Leave off.** Vosk's small model is a wake-word gate; using it as the command model
   is what made recognition feel broken (it ran this way for weeks while the whisper
   container was dead, which is the real story behind "распознаётся косо/криво").
+- `STT_VOSK_STREAM=1` — keep one Vosk connection per speaker and stream audio as it
+  arrives, instead of opening one per utterance. Measured finalisation cost: **~260ms
+  and flat**, versus 600-720ms for the per-utterance path, which also grows with the
+  length of the utterance. Off by default; the per-utterance path stays as fallback and
+  is used automatically if the dial fails.
 - `STT_LOG_LEVEL` — 0 silent / 1 commands (default) / 2 all transcripts.
 - `AI_DEBUG=1` — log raw `[ai] ->` request / `[ai] <-` response to the AI service.
 - `DJ_BREAK_EVERY` — DJ comment every N tracks (default 3).
@@ -96,6 +101,26 @@ exact hit from the cheap model is asking it for precision it does not have.
   anyway): a restricted vocabulary **snaps everything to the nearest phrase**. "Моя машина
   сломалась вчера" came back as `"марина марина [unk]"` and "Включи Машину времени" as
   `"[unk] марина"` — constant false wakes. The big open-vocabulary model got both right.
+
+## Streaming gate (STT_VOSK_STREAM) — three things measured the hard way
+1. **Utterance boundaries stay ours.** Kaldi's endpointer only fires when it hears a
+   real noise floor: measured, it finalises after low-level noise and stays silent
+   through digital zeros, the acoustic model having never been trained on absolute
+   silence. Discord sends no packets at all while nobody speaks, so waiting for Kaldi
+   to close an utterance means waiting forever. The `pauseTimeout` timer decides.
+2. **`{"eof" : 1}` is what completes a transcript, not padding.** The online decoder
+   holds words back until audio follows them. A 1.4s "Марина" came back **empty**, and
+   "Марина, как дела" came back as just "марина"; noise tails of 300ms up to 2s did not
+   help. The end-of-stream marker did, immediately. It also ends the session, which is
+   why the connection is recycled per utterance (`Flush` → `TakeText` → `Close`).
+3. **The recognizer must be recycled.** It keeps decoder state across utterances, so a
+   reused connection returns the previous transcript glued to the front — one "Марина"
+   would then hold the gate open for every sentence after it.
+
+The incremental downmix (`downmix.go`) exists because the 5-tap filter reads two samples
+either side of each output. Run per packet without carry-over it would clamp at every
+20ms Opus boundary — a click every 20ms, in the exact band that separates "марина" from
+"машина". `downmix_test.go` locks it to the batch version sample-for-sample.
 
 ## STT audio handling — what NOT to re-add
 Benchmarks on real Russian audio show VAD-cutting and AGC cost **6-9 points of WER**: the

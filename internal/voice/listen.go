@@ -41,6 +41,11 @@ const (
 	// wakeFollowupWindow: after hearing the wake word alone, keep listening this
 	// long for the command in the following segment(s).
 	wakeFollowupWindow = 10 * time.Second
+
+	// streamIdleTimeout: how long a silent speaker keeps their streaming gate
+	// connection. Each one holds a recognizer on the Vosk server, so idle
+	// speakers should not sit on them; reconnecting costs one dial.
+	streamIdleTimeout = 60 * time.Second
 )
 
 // listeners holds the live listener per voice connection, so a repeat /join can
@@ -82,8 +87,33 @@ func (l *voiceListener) setChID(channelID string) {
 
 type speaker struct {
 	dec  *gopus.Decoder
-	buf  []int16
 	last time.Time
+
+	// mu guards buf. In streaming mode the receive loop appends to it while the
+	// Vosk reader goroutine takes it away at end of utterance.
+	mu  sync.Mutex
+	buf []int16
+
+	// Streaming mode only (STT_VOSK_STREAM): one live gate connection per
+	// speaker, plus the filter state the incremental downmix needs.
+	stream       *voskStream
+	dm           downmixer
+	streamFailed bool // dial failed; fall back to the batch path for this speaker
+}
+
+func (s *speaker) append(pcm []int16) {
+	s.mu.Lock()
+	s.buf = append(s.buf, pcm...)
+	s.mu.Unlock()
+}
+
+// take removes and returns the audio buffered so far.
+func (s *speaker) take() []int16 {
+	s.mu.Lock()
+	seg := s.buf
+	s.buf = nil
+	s.mu.Unlock()
+	return seg
 }
 
 // arm/disarm/isArmed track speakers who just said the wake word alone, so the
@@ -147,6 +177,13 @@ func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
 	speakers := make(map[uint32]*speaker)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	defer func() {
+		for _, sp := range speakers {
+			if sp.stream != nil {
+				sp.stream.Close()
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -175,22 +212,86 @@ func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
 			if err != nil {
 				continue
 			}
-			sp.buf = append(sp.buf, pcm...)
 			sp.last = time.Now()
+
+			if voskStreaming() && !sp.streamFailed {
+				if sp.stream == nil {
+					l.openStream(sp)
+				}
+				if sp.stream != nil {
+					// Keep the original 48k stereo for the accurate model, and feed
+					// the gate its 16k mono as it arrives.
+					sp.append(pcm)
+					if err := sp.stream.Write(sp.dm.write(pcm)); err != nil {
+						if sttLogLevel() >= sttLogCommands {
+							log.Println("[stt] vosk stream write:", err)
+						}
+						sp.stream.Close()
+						sp.stream = nil
+						sp.dm = downmixer{}
+					}
+					continue
+				}
+			}
+			sp.append(pcm)
 
 		case <-ticker.C:
 			now := time.Now()
 
 			for ssrc, sp := range speakers {
-				if len(sp.buf) == 0 {
-					continue
-				}
-				if now.Sub(sp.last) < pauseTimeout && len(sp.buf) < maxSegmentSamples {
+				sp.mu.Lock()
+				pending := len(sp.buf)
+				sp.mu.Unlock()
+
+				if sp.stream != nil {
+					if pending == 0 {
+						// Reclaim the connection from a speaker who has gone quiet;
+						// each one holds a recognizer on the server.
+						if now.Sub(sp.last) > streamIdleTimeout {
+							sp.stream.Close()
+							sp.stream = nil
+							sp.dm = downmixer{}
+						}
+						continue
+					}
+					if now.Sub(sp.last) < pauseTimeout {
+						continue
+					}
+
+					seg := sp.take()
+					stream := sp.stream
+					// Recycle: the recognizer keeps decoder state across utterances,
+					// so without a fresh connection the next transcript would still
+					// carry this one — and a single "Марина" would keep the gate open
+					// for every sentence after it.
+					sp.stream = nil
+					sp.dm = downmixer{}
+
+					if len(seg) < minSegmentSamples {
+						go stream.Close()
+						continue
+					}
+					userID, _ := vc.SSRCUser(ssrc)
+					speechMs := len(seg) / recvChannels * 1000 / recvSampleRate
+					// Off the receive loop: Flush waits on the decoder, and this
+					// goroutine must not hold up incoming packets from anyone else.
+					go func() {
+						stream.Flush()
+						gate := stream.TakeText()
+						stream.Close()
+						l.decide(vc, seg, gate, userID, ssrc, speechMs)
+					}()
 					continue
 				}
 
-				seg := sp.buf
-				sp.buf = nil
+				if pending == 0 {
+					continue
+				}
+				if now.Sub(sp.last) < pauseTimeout && pending < maxSegmentSamples {
+					continue
+				}
+
+				seg := sp.take()
 				if len(seg) < minSegmentSamples {
 					continue
 				}
@@ -260,6 +361,39 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 		}
 		return
 	}
+	l.decide(vc, pcm, gate, userID, ssrc, speechMs)
+}
+
+// openStream gives a speaker their own live gate connection. On failure the
+// speaker falls back to the batch path for the rest of the session rather than
+// retrying on every packet — a dead Vosk should degrade the bot, not flood it.
+func (l *voiceListener) openStream(sp *speaker) {
+	// Short: this dial sits on the receive loop, which serves every speaker. A
+	// Vosk slow enough to miss it is one we are better off not waiting for — the
+	// per-utterance path below still works.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	// No callbacks: the stream accumulates its transcript and the receive loop
+	// collects it at the utterance boundary it already decides.
+	stream, err := dialVoskStream(ctx, nil, nil)
+	if err != nil {
+		sp.streamFailed = true
+		if sttLogLevel() >= sttLogCommands {
+			log.Println("[stt] vosk stream unavailable, using per-segment gate:", err)
+		}
+		return
+	}
+	sp.stream = stream
+	sp.dm = downmixer{}
+}
+
+// decide runs the second half of the cascade: everything from "the cheap gate
+// has spoken" onwards. Split out so the streaming gate, which already has the
+// text, joins the same path instead of duplicating it.
+func (l *voiceListener) decide(vc *discordgo.VoiceConnection, pcm []int16, gate, userID string, ssrc uint32, speechMs int) {
+	lvl := sttLogLevel()
+
 	armed := l.isArmed(ssrc)
 	near := containsNearWake(gate)
 	if lvl >= sttLogAll {
@@ -268,6 +402,12 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 	if !near && !armed {
 		return // nothing like the name, and no command is expected -> stop here
 	}
+	if l.chID() == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 
 	// Vosk-only: no stronger model to appeal to, so the gate's own strict reading
 	// is the verdict and the loose match above cannot be confirmed.
