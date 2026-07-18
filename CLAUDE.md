@@ -117,6 +117,16 @@ exact hit from the cheap model is asking it for precision it does not have.
    reused connection returns the previous transcript glued to the front — one "Марина"
    would then hold the gate open for every sentence after it.
 
+**The segment cap must not cut where it lands.** It bounds memory (without it an
+unbroken monologue grew the buffer without limit — 14.7s segments seen live), but unlike
+a pause it falls wherever the speaker happens to be, so cutting there can split the wake
+word across two segments and lose it. Instead, when the cap is reached and nothing near
+the name has been decoded, the audio is dropped — it could never have been needed — and
+the stream keeps running, holding a `capOverlapSamples` tail to cover the gate's ~2s
+decoding lag in case the name is being spoken right then. Only a real wake candidate
+causes a cut, and then it is an ordinary one, so a command is never delivered twice
+(which a naive overlap would do whenever a whole command landed inside it).
+
 The incremental downmix (`downmix.go`) exists because the 5-tap filter reads two samples
 either side of each output. Run per packet without carry-over it would clamp at every
 20ms Opus boundary — a click every 20ms, in the exact band that separates "марина" from

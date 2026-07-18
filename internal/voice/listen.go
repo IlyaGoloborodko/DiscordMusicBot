@@ -46,6 +46,13 @@ const (
 	// connection. Each one holds a recognizer on the Vosk server, so idle
 	// speakers should not sit on them; reconnecting costs one dial.
 	streamIdleTimeout = 60 * time.Second
+
+	// capOverlapSamples is the audio kept when the segment cap is reached in the
+	// middle of continuous speech. It has to outlast the gate's decoding lag,
+	// measured at roughly 2s on this model — the wake word can be spoken and not
+	// yet visible in the transcript when the cap fires, and a shorter tail would
+	// throw away the very audio that proves it.
+	capOverlapSamples = recvSampleRate * recvChannels * 4 // ~4s
 )
 
 // listeners holds the live listener per voice connection, so a repeat /join can
@@ -114,6 +121,16 @@ func (s *speaker) take() []int16 {
 	s.buf = nil
 	s.mu.Unlock()
 	return seg
+}
+
+// keepTail discards all but the last n samples, bounding memory while leaving
+// enough audio that a wake word spoken just before the cut is still there.
+func (s *speaker) keepTail(n int) {
+	s.mu.Lock()
+	if len(s.buf) > n {
+		s.buf = append(s.buf[:0], s.buf[len(s.buf)-n:]...)
+	}
+	s.mu.Unlock()
 }
 
 // arm/disarm/isArmed track speakers who just said the wake word alone, so the
@@ -254,7 +271,23 @@ func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
 						}
 						continue
 					}
-					if now.Sub(sp.last) < pauseTimeout {
+					// The cap bounds memory: without it an unbroken monologue grows
+					// the buffer without limit (14.7s segments were seen live).
+					hitCap := pending >= maxSegmentSamples
+					if now.Sub(sp.last) < pauseTimeout && !hitCap {
+						continue
+					}
+
+					// Hitting the cap is not an utterance ending, so cutting there
+					// would split a wake word across two segments and lose it. When
+					// nothing near the name has been decoded, this audio will never be
+					// used — drop it and leave the stream running, keeping a tail long
+					// enough to cover the decoder's lag in case the name is being said
+					// right now. Only a real wake candidate is worth cutting for, and
+					// then it is cut exactly like any other utterance, so a command can
+					// never be delivered twice.
+					if hitCap && !containsNearWake(sp.stream.Peek()) {
+						sp.keepTail(capOverlapSamples)
 						continue
 					}
 

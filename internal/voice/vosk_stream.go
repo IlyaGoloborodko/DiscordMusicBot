@@ -92,6 +92,14 @@ func (s *voskStream) Flush() {
 	}
 }
 
+// Peek reports what has been decoded so far without consuming it or ending the
+// utterance, for deciding whether the audio held so far is worth keeping.
+func (s *voskStream) Peek() string {
+	s.tmu.Lock()
+	defer s.tmu.Unlock()
+	return strings.TrimSpace(strings.Join(append(append([]string(nil), s.final...), s.partial), " "))
+}
+
 // TakeText returns everything heard since the last call and clears it. The
 // connection must be recycled afterwards: the recognizer keeps its decoder state
 // otherwise, and the next utterance would arrive with this one still glued to
