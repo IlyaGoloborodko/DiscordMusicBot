@@ -31,7 +31,6 @@ command STT; the AI agent and search are separate Python services.
 | **[DiscordAiService](https://github.com/IlyaGoloborodko/DiscordAiService)** | `http://127.0.0.1:8000` | `POST /agent` (decisions), `POST /tts` (Piper) |
 | **[media-source-service](https://github.com/IlyaGoloborodko/media-source-service)**                                                | `http://127.0.0.1:9000` | `/search`, `/stream`, `/playlist` |
 | **OpenAI** (command STT)                                                    | cloud | `gpt-4o-mini-transcribe`, set `OPENAI_API_KEY` |
-| **whisper** (STT fallback)                                                  | `http://127.0.0.1:9010` | `onerahmet/openai-whisper-asr-webservice`, only when `OPENAI_API_KEY` is empty |
 | **Vosk** (wake word)                                                        | `ws://127.0.0.1:2700` | `alphacep/kaldi-ru`, always local |
 
 ## Prerequisites
@@ -48,17 +47,13 @@ command STT; the AI agent and search are separate Python services.
    cp .env.example .env      # then fill DISCORD_TOKEN, AI_SERVICE_ADDR, etc.
    ```
 
-2. **STT containers** (PowerShell, one line each)
+2. **Wake-word gate** (PowerShell, one line)
    ```powershell
-   # whisper (CPU). Port 9000 is the search service, so map to 9010.
-   docker run -d --name whisper --restart unless-stopped -p 9010:9000 -e ASR_ENGINE=faster_whisper -e ASR_MODEL=small -v whisper-cache:/root/.cache onerahmet/openai-whisper-asr-webservice:latest
-
-   # Vosk (Russian) wake-word gate
    docker run -d --name vosk-ru --restart unless-stopped -p 2700:2700 alphacep/kaldi-ru
    ```
-   > GPU: use the `-gpu` image + `--gpus all` **only** with an NVIDIA card whose driver
-   > supports the image's CUDA. RTX 50-series (Blackwell/sm_120) needs `faster_whisper`
-   > (CTranslate2), not `openai_whisper` (PyTorch).
+   > This is the only local STT container. Commands themselves go to OpenAI, so
+   > `OPENAI_API_KEY` is required for voice control — there is no local fallback. The
+   > gate runs first, so only utterances containing the wake word leave the machine.
 
 3. **Run the bot**
    ```
@@ -82,7 +77,7 @@ command STT; the AI agent and search are separate Python services.
 ## Environment
 
 See [`.env.example`](.env.example) for the full list. Key ones: `DISCORD_TOKEN`,
-`AI_SERVICE_ADDR`, `SEARCH_SERVICE_ADDR`, `WHISPER_SERVER_ADDR`, `VOSK_SERVER_ADDR`,
+`AI_SERVICE_ADDR`, `SEARCH_SERVICE_ADDR`, `OPENAI_API_KEY`, `VOSK_SERVER_ADDR`,
 `STT_VOSK_ONLY`, `STT_LOG_LEVEL`, `AI_DEBUG`, `DJ_BREAK_EVERY`.
 
 ## Notes

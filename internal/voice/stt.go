@@ -10,7 +10,6 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
-	neturl "net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -21,7 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Discord delivers 48kHz stereo; whisper.cpp wants 16kHz mono.
+// Discord delivers 48kHz stereo; the Vosk gate's protocol wants 16kHz mono.
 const (
 	recvSampleRate = 48000
 	recvChannels   = 2
@@ -72,7 +71,7 @@ func containsNearWake(text string) bool {
 const (
 	sttLogSilent   = 0 // nothing
 	sttLogCommands = 1 // only wake-word commands (text after "Марина") + AI round-trip
-	sttLogAll      = 2 // every transcribed utterance (full whisper output)
+	sttLogAll      = 2 // every transcribed utterance, gate included
 )
 
 // sttLogLevel reads STT_LOG_LEVEL (0/1/2); defaults to sttLogCommands.
@@ -87,15 +86,9 @@ func sttLogLevel() int {
 	}
 }
 
-// whisperServerAddr is the base URL of the whisper HTTP service (e.g.
-// onerahmet/openai-whisper-asr-webservice), like "http://127.0.0.1:9010".
-func whisperServerAddr() string {
-	return strings.TrimSpace(os.Getenv("WHISPER_SERVER_ADDR"))
-}
-
 // voskServerAddr is the websocket URL of the small Vosk model server (e.g.
 // alphacep/kaldi-ru), like "ws://127.0.0.1:2700". When set, it is used as a
-// cheap wake-word gate before the heavy whisper pass.
+// cheap wake-word gate before paying for the accurate model.
 func voskServerAddr() string {
 	return strings.TrimSpace(os.Getenv("VOSK_SERVER_ADDR"))
 }
@@ -239,14 +232,18 @@ const whisperPrompt = "Разговор с ботом Мариной. Марин
 	"Марина, продолжи. Марина, сделай погромче. Марина, потише. Марина, пропусти трек. " +
 	"Марина, что в очереди? Марина, останови."
 
-// transcribe turns a captured utterance (48kHz stereo PCM) into text using
-// whichever command model is configured: OpenAI when OPENAI_API_KEY is set,
-// otherwise the local whisper HTTP service.
+// transcribe turns a captured utterance (48kHz stereo PCM) into command text.
+//
+// There is no local fallback: the self-hosted whisper container was retired once
+// OpenAI proved both faster and more accurate here (~5.3% WER on Russian at
+// 0.5-1.5s, against 4s+ for whisper medium on this CPU — and the GPU route is
+// closed, the RTX 50-series being too new for the image's PyTorch). Only
+// utterances the local Vosk gate has already accepted reach this point.
 func transcribe(ctx context.Context, pcm []int16) (string, error) {
-	if openaiKey() != "" {
-		return openaiTranscribe(ctx, pcm)
+	if openaiKey() == "" {
+		return "", fmt.Errorf("OPENAI_API_KEY is not set: voice commands cannot be transcribed")
 	}
-	return whisperTranscribe(ctx, pcm)
+	return openaiTranscribe(ctx, pcm)
 }
 
 // toFLAC16kMono re-encodes the captured 48k stereo PCM as 16kHz mono FLAC via
@@ -336,73 +333,6 @@ func openaiTranscribe(ctx context.Context, pcm []int16) (string, error) {
 	return cleanWhisperOutput(string(out)), nil
 }
 
-// whisperTranscribe turns 48kHz-stereo PCM into text by posting it to the local
-// whisper HTTP service (onerahmet/openai-whisper-asr-webservice): POST /asr with
-// the WAV as the "audio_file" multipart field; output=txt returns the transcript.
-//
-// We hand over the original 48k stereo and let the server's ffmpeg resample
-// (encode=true). Doing it ourselves needed a cheap decimating filter that both
-// rolled off the 8kHz band (~-7dB) and aliased 9-14kHz back onto 2-7kHz at only
-// -12..-19dB — exactly where the fricatives live.
-//
-// vad_filter lets faster_whisper drop non-speech itself, which replaces the
-// amplitude-threshold trimming we used to do (that shaved the quiet onsets off
-// words and dropped whole clips from quiet mics). It is NOT optional while an
-// initial_prompt is set: measured on this container, silence and noise with
-// vad_filter=false come back as the prompt text echoed verbatim, which would
-// hand the AI a phantom command. With vad_filter=true both return empty.
-func whisperTranscribe(ctx context.Context, pcm []int16) (string, error) {
-	addr := whisperServerAddr()
-	if addr == "" {
-		return "", fmt.Errorf("WHISPER_SERVER_ADDR is not set")
-	}
-
-	wav := pcmToWAV(pcm, recvSampleRate, recvChannels)
-
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	part, err := mw.CreateFormFile("audio_file", "utt.wav")
-	if err != nil {
-		return "", err
-	}
-	if _, err := part.Write(wav); err != nil {
-		return "", err
-	}
-	if err := mw.Close(); err != nil {
-		return "", err
-	}
-
-	q := neturl.Values{
-		"task":           {"transcribe"},
-		"language":       {"ru"},
-		"output":         {"txt"},
-		"encode":         {"true"},
-		"vad_filter":     {"true"},
-		"initial_prompt": {whisperPrompt},
-	}
-	url := strings.TrimRight(addr, "/") + "/asr?" + q.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("whisper server request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	out, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("whisper server %s: %s", resp.Status, strings.TrimSpace(string(out)))
-	}
-	return cleanWhisperOutput(string(out)), nil
-}
-
 func cleanWhisperOutput(s string) string {
 	var parts []string
 	for _, ln := range strings.Split(s, "\n") {
@@ -431,8 +361,8 @@ func rms(pcm []int16) float64 {
 // ate the starts and ends of words, and on a quiet mic the companion RMS gate
 // discarded whole utterances. Benchmarks on real Russian audio show this kind of
 // preprocessing (VAD-cut, AGC) costs 6-9 points of WER, because the models are
-// trained on unprocessed audio. Silence is now handled by the server's
-// vad_filter instead, and the gate below only rejects digital silence.
+// trained on unprocessed audio. The gate below only rejects digital silence, and
+// nothing else trims: the accurate model is sent the utterance as captured.
 
 var (
 	reBracket = regexp.MustCompile(`\[[^\]]*\]`)
@@ -446,11 +376,14 @@ var (
 		"редактор субтитров", "корректор", "субтитры",
 		"подпишись", "продолжение следует", "спасибо за просмотр",
 		"ставьте лайк", "amara", "dimatorzok",
-		// Prompt echo: fed non-speech, the model parrots initial_prompt back as
-		// the transcript. whisperPrompt opens with this framing sentence exactly
-		// so the echo is recognisable and no real user would ever utter it. The
-		// local backend has vad_filter to prevent this; the OpenAI API has no
-		// such knob, so this is the defence there.
+		// Prompt echo: fed non-speech, the model parrots the prompt back as the
+		// transcript — measured, silence and noise both returned "Разговор с
+		// ботом Мариной." verbatim, which carries the wake word and would hand
+		// the AI a phantom command. The retired local backend had vad_filter to
+		// suppress it; the OpenAI API has no such knob, so this line and the Vosk
+		// gate are now the whole defence. whisperPrompt opens with that sentence
+		// precisely so the echo stays recognisable — keep its first sentence
+		// something no real user would ever say.
 		"разговор с ботом мариной",
 	}
 )
@@ -498,26 +431,4 @@ func downmixTo16kMono(pcm []int16) []int16 {
 		out = append(out, int16(v/9))
 	}
 	return out
-}
-
-// pcmToWAV wraps interleaved 16-bit PCM in a minimal RIFF/WAVE container.
-func pcmToWAV(pcm []int16, sampleRate, channels int) []byte {
-	dataSize := len(pcm) * 2
-
-	var buf bytes.Buffer
-	buf.WriteString("RIFF")
-	binary.Write(&buf, binary.LittleEndian, uint32(36+dataSize))
-	buf.WriteString("WAVE")
-	buf.WriteString("fmt ")
-	binary.Write(&buf, binary.LittleEndian, uint32(16))
-	binary.Write(&buf, binary.LittleEndian, uint16(1)) // PCM
-	binary.Write(&buf, binary.LittleEndian, uint16(channels))
-	binary.Write(&buf, binary.LittleEndian, uint32(sampleRate))
-	binary.Write(&buf, binary.LittleEndian, uint32(sampleRate*channels*2)) // byte rate
-	binary.Write(&buf, binary.LittleEndian, uint16(channels*2))            // block align
-	binary.Write(&buf, binary.LittleEndian, uint16(16))                    // bits per sample
-	buf.WriteString("data")
-	binary.Write(&buf, binary.LittleEndian, uint32(dataSize))
-	binary.Write(&buf, binary.LittleEndian, pcm)
-	return buf.Bytes()
 }

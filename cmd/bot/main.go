@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"discordAudio/internal/config"
@@ -71,6 +72,13 @@ func main() {
 	}
 
 	config.DebugGuildIDs = os.Getenv("DEBUG_GUIID")
+
+	// Not fatal — slash commands and playback work without it — but voice control
+	// does not, and there is no local fallback to quietly take over. Say so at
+	// startup rather than letting it surface as a failed command much later.
+	if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
+		log.Println("WARNING: OPENAI_API_KEY not set — voice commands will not be transcribed")
+	}
 
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {

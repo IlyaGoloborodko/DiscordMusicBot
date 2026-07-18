@@ -8,8 +8,7 @@ A Go Discord music + AI-DJ bot. Users control it by slash commands **and by voic
 |---|---|---|---|
 | AI agent + TTS | `AI_SERVICE_ADDR` | 8000 | `POST /agent` (decides actions), `POST /tts` (→ OpenAI `gpt-4o-mini-tts`) |
 | Search/media | `SEARCH_SERVICE_ADDR` | 9000 | `/search`, `/stream`, `/playlist` (YouTube etc.) |
-| OpenAI STT (cloud) | `OPENAI_API_KEY` | — | command text; `gpt-4o-mini-transcribe`. Preferred backend |
-| Whisper STT (HTTP) | `WHISPER_SERVER_ADDR` | 9010 | local fallback, only when `OPENAI_API_KEY` is empty |
+| OpenAI STT (cloud) | `OPENAI_API_KEY` | — | command text; `gpt-4o-mini-transcribe`. **Required, no fallback** |
 | Vosk STT (websocket) | `VOSK_SERVER_ADDR` | 2700 | `alphacep/kaldi-ru`, wake-word gate. Always local |
 
 Python sources live outside this repo: `C:\Users\sok20\PycharmProjects\DiscordAiService`
@@ -23,12 +22,15 @@ and `...\DsBotSearchService`.
   server joins voice and shows no commands. `config.CommandGuildIDs()` maps empty to
   `[]string{""}` because discordgo reads an empty guild id as "global"; returning an
   empty slice instead would register nothing anywhere (`config/consts_test.go`).
-- `OPENAI_API_KEY` — **selects the command STT backend**: set ⇒ OpenAI, empty ⇒ local
-  whisper at `WHISPER_SERVER_ADDR`. `OPENAI_STT_MODEL` defaults to
-  `gpt-4o-mini-transcribe` (~5.3% WER ru, $0.003/min, 0.5-1.5s vs 4s+ for local CPU
-  whisper — a Blackwell sm_120 GPU can't run the whisper image, so local won't get
-  faster). The Vosk gate stays local, so only wake-word utterances leave the machine.
-- `WHISPER_SERVER_ADDR`, `VOSK_SERVER_ADDR` — STT backends.
+- `OPENAI_API_KEY` — **required for voice control**; without it commands are not
+  transcribed at all (the bot warns at startup and slash commands still work).
+  `OPENAI_STT_MODEL` defaults to `gpt-4o-mini-transcribe` (~5.3% WER ru, $0.003/min,
+  0.5-1.5s). The Vosk gate stays local, so only wake-word utterances leave the machine.
+  **The self-hosted whisper fallback was removed**: it measured 4s+ per utterance on
+  this CPU against 0.5-1.5s for OpenAI, and the GPU route is closed (the RTX 50-series
+  is sm_120, too new for the image's PyTorch). Restoring it means bringing back
+  `whisperTranscribe`, its 25.7GB image and the `vad_filter`/`initial_prompt` handling.
+- `VOSK_SERVER_ADDR` — the wake-word gate.
 - `STT_VOSK_ONLY=1` — use Vosk for the command text too (skip the command model).
   **Leave off.** Vosk's small model is a wake-word gate; using it as the command model
   is what made recognition feel broken (it ran this way for weeks while the whisper
@@ -41,7 +43,8 @@ and `...\DsBotSearchService`.
 - `STT_LOG_LEVEL` — 0 silent / 1 commands (default) / 2 all transcripts.
 - `AI_DEBUG=1` — log raw `[ai] ->` request / `[ai] <-` response to the AI service.
 - `DJ_BREAK_EVERY` — DJ comment every N tracks (default 3).
-- `WHISPER_BIN`/`WHISPER_MODEL` — DEAD (old exec path removed); safe to delete.
+- `WHISPER_BIN`/`WHISPER_MODEL`/`WHISPER_SERVER_ADDR` — DEAD (local whisper removed);
+  safe to delete from `.env`.
 
 ## Layout
 - `cmd/bot` — entrypoint.
@@ -74,8 +77,8 @@ rebuild (see below).
    a 3s pause / 10s cap.
 2. **Vosk** transcribes the segment (cheap) and gates on wake word "Марина" (`wakeWords`
    in stt.go). Only wake-word utterances (or the ≤10s armed follow-up) go further.
-3. Command text = Vosk (`STT_VOSK_ONLY`) or whisper. Full text incl. the wake word is
-   sent to the AI.
+3. Command text comes from OpenAI (or Vosk itself under `STT_VOSK_ONLY`). Full text
+   incl. the wake word is sent to the AI.
 
 ## The wake word is a two-stage cascade — don't collapse it
 The two stages have **opposite jobs**. Keep them that way; `stt_test.go` locks it down.
@@ -138,24 +141,21 @@ models are trained on unprocessed audio, so "cleaning" it moves the input off-di
 - **Don't trim on an amplitude threshold.** A `trimSilence()` used to cut to the region
   above int16 350. Unvoiced consonants (с, ш, ф, х, ц) are low-amplitude, so it ate word
   onsets/endings; the companion RMS gate dropped quiet mics' clips entirely. Both gone.
-  `minSpeechRMS` is now a silence floor (40), not a speech gate. Silence is `vad_filter`'s
-  job now (server-side).
-- **Don't resample ourselves.** whisper gets the original 48k stereo with `encode=true`;
-  the server's ffmpeg does it properly. Our own decimator rolled 8kHz off ~7dB and aliased
-  9-14kHz back onto 2-7kHz at only -12..-19dB — right where the fricatives are.
-  `downmixTo16kMono` survives *only* because Vosk's websocket protocol demands 16k mono.
+  `minSpeechRMS` is now a silence floor (40), not a speech gate. Nothing else trims.
+- **Don't resample ourselves.** ffmpeg produces the 16k mono FLAC that goes to OpenAI.
+  Our own decimator rolled 8kHz off ~7dB and aliased 9-14kHz back onto 2-7kHz at only
+  -12..-19dB — right where the fricatives are. `downmixTo16kMono` and the streaming
+  `downmixer` survive *only* because Vosk's websocket protocol demands 16k mono.
 - **Don't add AGC/normalization** — actively harmful per the above.
-- `initial_prompt` (`whisperPrompt`, sent as `prompt` on the OpenAI backend) biases the
-  decoder toward the wake word + playback vocabulary. This is contextual biasing and buys
-  most of what training a custom KWS model would, for free. It is undocumented on the
-  whisper container but real (see `app/webservice.py`).
+- `whisperPrompt` (sent as `prompt`) biases the decoder toward the wake word + playback
+  vocabulary. This is contextual biasing and buys most of what training a custom KWS
+  model would, for free.
 - **A prompt needs an echo defence.** Fed non-speech, the model parrots the prompt back as
-  the transcript — measured here: silence and noise with `vad_filter=false` both returned
-  "Разговор с ботом Мариной.", which would hand the AI a phantom command. Two guards:
-  `vad_filter=true` (local backend returns empty for both — treat it as mandatory, not
-  optional), and `whisperPrompt`'s opening framing sentence is blacklisted in
-  `hallucinationMarkers`. The OpenAI API has no vad_filter, so there the blacklist and the
-  Vosk gate are the whole defence — keep that first sentence something no user would say.
+  the transcript — measured: silence and noise both returned "Разговор с ботом Мариной."
+  verbatim, which carries the wake word and would hand the AI a phantom command. The
+  retired local backend had `vad_filter` to suppress it; the OpenAI API has no such knob,
+  so **the blacklist in `hallucinationMarkers` plus the Vosk gate are now the whole
+  defence**. Keep `whisperPrompt`'s first sentence something no real user would say.
 4. `handleAI` calls `POST /agent` with `Tools: PlayerTools()` and `context`
    (now_playing, queue, queue_len, volume). Music **ducks** while the AI thinks.
 
