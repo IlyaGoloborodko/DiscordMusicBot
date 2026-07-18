@@ -1210,7 +1210,6 @@ func (v *VoiceConnection) handleDAVEBinary(message []byte) {
 		}
 
 		dave.HandlePrepareTransition(transitionID, 1)
-		v.sendDAVEReadyForTransition(transitionID)
 
 		// ResetForReWelcome, not GenerateKeyPackage: the commit already made this
 		// epoch's secrets useless. Keeping them is worse than having none, because
@@ -1223,8 +1222,20 @@ func (v *VoiceConnection) handleDAVEBinary(message []byte) {
 			v.log(LogError, "DAVE key package generation for re-Welcome failed: %s", err)
 			return
 		}
-		v.sendDAVEKeyPackageBinary(kpData)
+
+		// Order matters, and READY_FOR_TRANSITION (23) must NOT be sent here.
+		// This client cannot process an MLS commit, and the protocol is explicit:
+		// a client that cannot process one sends INVALID_COMMIT_WELCOME (31)
+		// *instead of* 23. Sending both told the gateway we had transitioned
+		// successfully, so it never re-added us and the Welcome never came —
+		// measured live as ~26s of dead audio every time someone joined or left,
+		// recovered only by the watchdog reconnecting.
+		//
+		// On 31 the gateway removes us from the group and puts us back in the
+		// pending state; it then re-adds us when it sees a fresh key package, so
+		// 26 goes second.
 		v.sendDAVEInvalidCommitWelcome(transitionID)
+		v.sendDAVEKeyPackageBinary(kpData)
 		v.watchReWelcome(daveReWelcomeTimeout)
 
 	case 30:

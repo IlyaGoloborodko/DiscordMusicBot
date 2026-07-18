@@ -10,10 +10,13 @@ import (
 )
 
 // daveReWelcomeTimeout is how long to wait for the Welcome that should follow a
-// re-add request before giving up and rebuilding the connection. Discord answers
-// in well under a second when it answers at all; this is generous so a slow
-// round-trip is never mistaken for a dead session.
-const daveReWelcomeTimeout = 10 * time.Second
+// re-add request before giving up and rebuilding the connection.
+//
+// Re-adding takes a few round trips through the group (remove proposal, our key
+// package, add proposal, commit), so this cannot be tight — and firing early is
+// the expensive mistake: reconnecting costs ~16s of dead audio, far more than
+// waiting a moment longer for a Welcome that was already on its way.
+const daveReWelcomeTimeout = 5 * time.Second
 
 // watchReWelcome guards the gap after an epoch change this client could not
 // follow. It cannot process MLS commits, so it asks Discord to re-add it and

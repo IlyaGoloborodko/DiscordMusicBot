@@ -72,6 +72,23 @@ decryption so the bot can transcribe other users:
 BSD-3 licensed; keep `LICENSE`. Don't edit `third_party/` casually — it forces a full
 rebuild (see below).
 
+## DAVE epoch changes (someone joins/leaves the voice channel)
+The fork cannot process an MLS commit — `HandleCommit` is a no-op — so on opcode 29 it
+asks the gateway to re-add it and waits for a fresh Welcome.
+
+**Never send READY_FOR_TRANSITION (23) from that path.** The protocol is explicit: a
+client that cannot process a commit sends INVALID_COMMIT_WELCOME (31) *instead of* 23.
+Sending both told the gateway we had transitioned fine, so it never re-added us, the
+Welcome never came, and audio died in both directions — the stale sender key is rejected
+by everyone (music stops) while stale receive keys turn frames into noise (transcripts go
+empty). Measured live: ~26s dead every time anyone joined or left, recovered only by the
+watchdog reconnecting. Order is 31 first, then the key package (26): the gateway removes
+us on 31 and re-adds us when it sees the new key package.
+
+`watchReWelcome` stays as a safety net — if no Welcome arrives it rebuilds the
+connection, which costs ~16s, so its timeout must not be tight enough to fire on a
+Welcome that was merely slow.
+
 ## Voice → AI flow
 1. `opusReceiver` (fork) decrypts DAVE frames; `listen.go` decodes per-SSRC, segments on
    a 3s pause / 10s cap.
