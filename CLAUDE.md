@@ -176,6 +176,25 @@ models are trained on unprocessed audio, so "cleaning" it moves the input off-di
 4. `handleAI` calls `POST /agent` with `Tools: PlayerTools()` and `context`
    (now_playing, queue, queue_len, volume). Music **ducks** while the AI thinks.
 
+## Playback reports (POST /playback)
+The AI service logs a track when it hands it over, which over-counts: a queue of five
+that the listener skipped after two still logged five. Only the bot knows what was
+actually heard, so it reports each track that produced audio — including tracks started
+by slash command, which are just as honest a taste signal as the AI's picks.
+
+- **`played_ms` counts frames handed to Discord**, never elapsed time
+  (`stream.Controls.Frames` × `FrameMs`). A paused stream emits nothing, so pause time
+  cannot leak in — the failure that would look perfectly plausible in the data.
+  `stream/pause_test.go` drives the real ffmpeg loop to prove it.
+- **A track that produced no audio reports nothing** (`frames <= 0`). That is the whole
+  point: queued-but-unplayed tracks were the pollution.
+- **Fire-and-forget**: reporting runs off the player loop, failures are swallowed (visible
+  only under `AI_DEBUG`), no retries, no queue. Analytics must never delay music.
+- **No dedup, no aggregation.** Two plays are two events; a repeat listen is itself the
+  signal. `reason` is reported as observed — a skip is not a dislike, tracks get skipped
+  for having just played.
+- Address: `PLAYBACK_SERVICE_ADDR`, falling back to `AI_SERVICE_ADDR`.
+
 ## AI contract — client-declared tools (variant A)
 The bot advertises capabilities as **tools** so the AI service stays decoupled from
 Discord. Request has `tools: [...]`; response has `tool_calls: [{name, arguments}]`.

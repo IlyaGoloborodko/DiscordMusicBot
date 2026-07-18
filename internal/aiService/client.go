@@ -12,12 +12,15 @@ import (
 	"strings"
 )
 
-// aiDebug enables logging of the raw request/response to the AI service
-// (AI_DEBUG=1/true).
-func aiDebug() bool {
+// DebugEnabled reports whether AI_DEBUG=1/true, which turns on logging of the
+// raw traffic to the AI service. Exported so callers can decide whether a
+// swallowed error is worth a line.
+func DebugEnabled() bool {
 	v := strings.TrimSpace(os.Getenv("AI_DEBUG"))
 	return v == "1" || strings.EqualFold(v, "true")
 }
+
+func aiDebug() bool { return DebugEnabled() }
 
 type Client struct {
 	baseURL string

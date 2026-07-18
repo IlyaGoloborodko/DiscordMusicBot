@@ -3,6 +3,7 @@ package player
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -452,13 +453,76 @@ func (p *Player) playURL(url string) *command {
 		p.overlay.clear()
 	}()
 
-	return p.playItem(func(ctx context.Context) error {
+	// Counting frames handed to Discord, rather than timing the track, is what
+	// keeps paused time out of the report: a paused stream sends nothing.
+	var frames atomic.Int64
+	track := p.nowPlaying
+
+	pc := p.playItem(func(ctx context.Context) error {
 		return stream.StartStreaming(ctx, p.conn(), url, stream.Controls{
 			Gain:    p.gain,
 			Paused:  p.isPaused,
 			Overlay: p.overlay.take,
+			Frames:  &frames,
 		})
 	})
+
+	p.reportPlayback(track, frames.Load(), stopReason(pc))
+	return pc
+}
+
+// stopReason describes why playback ended, from the command that interrupted it
+// (nil meaning it simply ran out). Reported as observed: a skip is not a verdict
+// on the track — it may have been skipped for having just played.
+func stopReason(pc *command) string {
+	if pc == nil {
+		return aiService.ReasonFinished
+	}
+	switch pc.kind {
+	case cmdStop:
+		return aiService.ReasonStopped
+	case cmdSkip:
+		return aiService.ReasonSkipped
+	case cmdAgent:
+		if pc.action == aiService.ActionStop {
+			return aiService.ReasonStopped
+		}
+		// skip, and play/replace_queue: the listener moved on to something else.
+		return aiService.ReasonSkipped
+	}
+	return aiService.ReasonSkipped
+}
+
+// reportPlayback tells the AI service a track was actually heard. Fire and
+// forget: analytics must never delay playback or surface errors to the user, and
+// a lost event is acceptable — so no retries, no queue, and failures are only
+// visible under AI_DEBUG.
+//
+// A track that never produced audio reports nothing. That is the point of the
+// whole exercise: queued-but-unplayed tracks were polluting the taste profile.
+func (p *Player) reportPlayback(track aiService.Track, frames int64, reason string) {
+	if track.ID == "" || frames <= 0 {
+		return
+	}
+
+	ev := aiService.PlaybackEvent{
+		Session:    aiService.AgentSession{GuildID: p.guildID, ChannelID: p.chID()},
+		TrackID:    track.ID,
+		Provider:   track.Provider,
+		PlayedMs:   frames * stream.FrameMs,
+		DurationMs: int64(track.Duration * 1000),
+		Reason:     reason,
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := p.ai.ReportPlayback(ctx, ev); err != nil {
+			if aiService.DebugEnabled() {
+				log.Printf("[player] playback report dropped (guild %s): %v", p.guildID, err)
+			}
+		}
+	}()
 }
 
 // speakOver plays a spoken line on top of the currently playing music: the clip

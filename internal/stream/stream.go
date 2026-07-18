@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -28,7 +29,15 @@ type Controls struct {
 	// frame, or nil when there is nothing to overlay. Mixed after Gain, so the
 	// overlay stays at full volume while the music underneath is ducked.
 	Overlay func(n int) []int16
+	// Frames counts the audio frames actually handed to Discord, if non-nil.
+	// Multiply by FrameMs for time actually heard: paused playback sends nothing,
+	// so a pause cannot inflate it the way wall-clock timing would.
+	Frames *atomic.Int64
 }
+
+// FrameMs is the duration of one Opus frame this package emits (960 samples at
+// 48kHz).
+const FrameMs = 20
 
 // TranscodePCM decodes an audio stream (raw s16le at the given rate/channels)
 // into 48kHz-stereo PCM held in memory — used to prepare a TTS clip for mixing.
@@ -134,6 +143,25 @@ func startFFmpegStreaming(ctx context.Context, vc *discordgo.VoiceConnection, cm
 	}
 	defer vc.Speaking(false)
 
+	// The sink is passed in rather than used directly so the frame loop can be
+	// exercised without a live voice websocket — which is the only way to prove
+	// that a paused stream emits nothing, and so that paused time cannot leak
+	// into playback reports.
+	return pumpFrames(ctx, cmd, stdout, &stderr, enc, ctrl, func(frame []byte) bool {
+		select {
+		case vc.OpusSend <- frame:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// pumpFrames reads PCM from ffmpeg, applies gain/overlay, encodes, and hands each
+// 20ms frame to send. send reports false when the context ended mid-write.
+func pumpFrames(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, stderr *bytes.Buffer,
+	enc *gopus.Encoder, ctrl Controls, send func([]byte) bool) error {
+
 	// Buffer for 20ms PCM frames (960 samples * 2 channels).
 	pcmBuf := make([]int16, 960*2)
 
@@ -141,16 +169,17 @@ func startFFmpegStreaming(ctx context.Context, vc *discordgo.VoiceConnection, cm
 		select {
 		case <-ctx.Done():
 			_ = cmd.Process.Kill()
-			_ = waitFFmpeg(cmd, &stderr)
+			_ = waitFFmpeg(cmd, stderr)
 			return ctx.Err()
 		default:
 			// Pause: stop pulling from ffmpeg so it blocks and playback holds its
-			// position; poll until resumed or cancelled.
+			// position; poll until resumed or cancelled. Nothing is read, encoded
+			// or sent here, so a pause adds no frames however long it lasts.
 			if ctrl.Paused != nil && ctrl.Paused() {
 				select {
 				case <-ctx.Done():
 					_ = cmd.Process.Kill()
-					_ = waitFFmpeg(cmd, &stderr)
+					_ = waitFFmpeg(cmd, stderr)
 					return ctx.Err()
 				case <-time.After(100 * time.Millisecond):
 				}
@@ -161,7 +190,7 @@ func startFFmpegStreaming(ctx context.Context, vc *discordgo.VoiceConnection, cm
 				if err != io.EOF && err != io.ErrUnexpectedEOF {
 					log.Println("PCM read error:", err)
 				}
-				return waitFFmpeg(cmd, &stderr)
+				return waitFFmpeg(cmd, stderr)
 			}
 			// Ducking: scale the PCM frame before encoding.
 			if ctrl.Gain != nil {
@@ -183,14 +212,15 @@ func startFFmpegStreaming(ctx context.Context, vc *discordgo.VoiceConnection, cm
 			if err != nil {
 				continue
 			}
-			// Select on ctx as well so a skip/stop interrupts even when the
-			// Discord send buffer is full.
-			select {
-			case vc.OpusSend <- opusFrame:
-			case <-ctx.Done():
+			// Counted only once actually handed over, so the number reflects audio
+			// that was really produced.
+			if !send(opusFrame) {
 				_ = cmd.Process.Kill()
-				_ = waitFFmpeg(cmd, &stderr)
+				_ = waitFFmpeg(cmd, stderr)
 				return ctx.Err()
+			}
+			if ctrl.Frames != nil {
+				ctrl.Frames.Add(1)
 			}
 		}
 	}
