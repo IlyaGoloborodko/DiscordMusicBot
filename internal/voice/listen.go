@@ -35,15 +35,41 @@ const (
 	wakeFollowupWindow = 10 * time.Second
 )
 
+// listeners holds the live listener per voice connection, so a repeat /join can
+// update where it talks instead of being ignored, and a disconnect can stop it.
 var (
-	listenMu      sync.Mutex
-	listenStarted = map[*discordgo.VoiceConnection]bool{}
+	listenMu  sync.Mutex
+	listeners = map[*discordgo.VoiceConnection]*voiceListener{}
 )
 
 type voiceListener struct {
-	session   *discordgo.Session
+	session *discordgo.Session
+
+	// chMu guards channelID: the text channel the bot answers in. It follows the
+	// most recent command instead of being frozen at the first /join — the AI
+	// service keys its conversation memory by guild+channel, so a channel id that
+	// silently disagrees with the player's is a lost history, not a cosmetic bug.
+	chMu      sync.RWMutex
 	channelID string
-	armed     sync.Map // uint32 ssrc -> time.Time: command follow-up window after a wake word
+
+	armed sync.Map      // uint32 ssrc -> time.Time: command follow-up window after a wake word
+	done  chan struct{} // closed on disconnect to stop run()
+}
+
+// chID returns the text channel the listener currently answers in.
+func (l *voiceListener) chID() string {
+	l.chMu.RLock()
+	defer l.chMu.RUnlock()
+	return l.channelID
+}
+
+func (l *voiceListener) setChID(channelID string) {
+	if channelID == "" {
+		return
+	}
+	l.chMu.Lock()
+	l.channelID = channelID
+	l.chMu.Unlock()
 }
 
 type speaker struct {
@@ -78,16 +104,35 @@ func StartVoiceListener(s *discordgo.Session, vc *discordgo.VoiceConnection, cha
 	}
 
 	listenMu.Lock()
-	if listenStarted[vc] {
+	if l, ok := listeners[vc]; ok {
 		listenMu.Unlock()
+		// Already listening: point it at the channel the command came from rather
+		// than dropping the update, or it keeps answering in the first /join
+		// channel forever.
+		l.setChID(channelID)
 		return
 	}
-	listenStarted[vc] = true
+	l := &voiceListener{session: s, channelID: channelID, done: make(chan struct{})}
+	listeners[vc] = l
 	listenMu.Unlock()
 
-	l := &voiceListener{session: s, channelID: channelID}
-
 	go l.run(vc)
+}
+
+// StopVoiceListener ends the listener for a voice connection. The fork never
+// closes OpusRecv, so without this the run goroutine would block on a dead
+// channel forever and its registry entry would keep the connection alive.
+func StopVoiceListener(vc *discordgo.VoiceConnection) {
+	if vc == nil {
+		return
+	}
+	listenMu.Lock()
+	l, ok := listeners[vc]
+	delete(listeners, vc)
+	listenMu.Unlock()
+	if ok {
+		close(l.done)
+	}
 }
 
 func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
@@ -97,6 +142,8 @@ func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
 
 	for {
 		select {
+		case <-l.done:
+			return
 		case pkt, ok := <-vc.OpusRecv:
 			if !ok {
 				return
@@ -164,7 +211,7 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 		}
 		return
 	}
-	if l.channelID == "" {
+	if l.chID() == "" {
 		return
 	}
 
@@ -301,7 +348,7 @@ func (l *voiceListener) handleAI(vc *discordgo.VoiceConnection, userID, message 
 
 	// Duck the music while the AI thinks; restore when the response lands (if it
 	// starts new playback that stream begins un-ducked).
-	p := playerManager.Get(l.session, vc, vc.GuildID, l.channelID)
+	p := playerManager.Get(l.session, vc, vc.GuildID, l.chID())
 	p.Duck()
 	defer p.Unduck()
 
@@ -343,7 +390,7 @@ func (l *voiceListener) handleAI(vc *discordgo.VoiceConnection, userID, message 
 func (l *voiceListener) agentSession(guildID, userID string) aiService.AgentSession {
 	sess := aiService.AgentSession{
 		GuildID:   guildID,
-		ChannelID: l.channelID,
+		ChannelID: l.chID(),
 		UserID:    userID,
 	}
 	if userID != "" {

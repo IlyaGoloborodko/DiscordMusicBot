@@ -21,13 +21,18 @@ import (
 // duckedGain is the extra music volume multiplier while the AI is "thinking".
 const duckedGain = 0.25
 
-// Volume scale: 1-10, default 5. The gain multiplier is level/10, so 10 is the
-// source volume and there is headroom to turn up from the default.
+// Volume scale: 1-10, default 5.
 const (
 	defaultVolume = 5
 	minVolume     = 1
 	maxVolume     = 10
 )
+
+// masterGain scales the whole 1-10 scale, so level 10 plays at a third of the
+// source volume. The scale used to map straight onto 0.1-1.0, which was too loud
+// to talk over at the default 5 — this quietens every level without moving the
+// slider the user sees or losing any of its range.
+const masterGain = 1.0 / 3.0
 
 // TTS stream format produced by the AI service /tts endpoint: raw headerless
 // s16le PCM. OpenAI (gpt-4o-mini-tts, TTS_FORMAT=pcm) emits 24kHz mono; the old
@@ -213,9 +218,10 @@ func (p *Player) Unduck() {
 }
 
 // gain is the current music volume multiplier, read per frame by the streamer:
-// the user volume level (1-10 -> 0.1-1.0), further reduced while ducking.
+// the user volume level (1-10) scaled by masterGain, further reduced while
+// ducking.
 func (p *Player) gain() float64 {
-	g := float64(p.Volume()) / float64(maxVolume)
+	g := float64(p.Volume()) / float64(maxVolume) * masterGain
 	if p.duckDepth.Load() > 0 {
 		g *= duckedGain
 	}
