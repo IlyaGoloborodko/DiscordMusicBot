@@ -13,6 +13,8 @@ import (
 
 	"discordAudio/internal/aiService"
 	"discordAudio/internal/stream"
+
+	"github.com/joho/godotenv"
 )
 
 // recorder stands in for the AI service and captures what the bot reports.
@@ -160,6 +162,13 @@ func TestMissingEndpointIsHarmless(t *testing.T) {
 func TestReportPlaybackAgainstLiveService(t *testing.T) {
 	if os.Getenv("PLAYBACK_LIVE") == "" {
 		t.Skip("set PLAYBACK_LIVE=1 to report a probe event to the running service")
+	}
+	// Tests don't run through main, so pick up the same .env the bot uses rather
+	// than making the caller repeat the address on the command line.
+	if os.Getenv("PLAYBACK_SERVICE_ADDR") == "" && os.Getenv("AI_SERVICE_ADDR") == "" {
+		if err := godotenv.Load("../../.env"); err != nil {
+			t.Skipf("no address configured and no .env to read one from: %v", err)
+		}
 	}
 
 	err := aiService.NewClient().ReportPlayback(context.Background(), aiService.PlaybackEvent{
