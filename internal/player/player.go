@@ -239,13 +239,21 @@ func (p *Player) Volume() int {
 }
 
 // SetVolume sets the volume level, clamped to 1-10, and returns the applied level.
+//
+// The log line records the resulting gain and whether ducking is active, because
+// the two are easy to confuse by ear: while the assistant thinks or talks the
+// music is at a quarter volume, so a level raised from 1 to 5 mid-answer sounds
+// almost unchanged (0.042 against 0.033) and only opens up once ducking clears.
 func (p *Player) SetVolume(level int) int {
 	if level < minVolume {
 		level = minVolume
 	} else if level > maxVolume {
 		level = maxVolume
 	}
+	was := p.Volume()
 	p.volume.Store(int32(level))
+	log.Printf("[player] volume %d -> %d (gain %.3f, ducked=%v)",
+		was, level, p.gain(), p.duckDepth.Load() > 0)
 	return level
 }
 
