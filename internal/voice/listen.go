@@ -17,8 +17,16 @@ const (
 	// with longer frames fail to decode and get dropped.
 	maxDecodeSamples = 5760
 
-	// pauseTimeout: finalize a speaker's utterance after this much silence.
-	pauseTimeout = 3 * time.Second
+	// pauseTimeout: finalize a speaker's utterance after this much silence. It is
+	// dead time on every single command, and in a lively channel a longer wait
+	// also means segments keep running into maxSegmentSamples — measured live at
+	// 3s, utterances came back at 9.8-10.2s constantly, so a command could sit in
+	// the buffer for nine seconds before anything even looked at it.
+	//
+	// Splitting an utterance at a mid-sentence pause is handled rather than
+	// avoided: "Марина" alone arms the speaker, and the next segment is taken as
+	// the command (see wakeFollowupWindow).
+	pauseTimeout = time.Second
 
 	// Segment bounds in interleaved-sample counts (48kHz * 2ch).
 	maxSegmentSamples = recvSampleRate * recvChannels * 10     // ~10s hard cap
