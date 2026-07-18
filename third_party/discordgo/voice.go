@@ -68,6 +68,14 @@ type VoiceConnection struct {
 	// decrypting DAVE (E2EE) audio frames on receive.
 	ssrcUsers sync.Map // uint32 -> string
 
+	// Re-Welcome tracking. This client cannot process an MLS commit, so on an
+	// epoch change it asks Discord to re-add it to the group and waits for a
+	// fresh Welcome. reWelcomeReq counts those requests; welcomeOK records the
+	// request number satisfied by the last Welcome. If the Welcome never comes
+	// the session is stuck on a dead epoch and the connection must be rebuilt.
+	reWelcomeReq uint64
+	welcomeOK    uint64
+
 	seqAck int
 
 	op4 voiceOP4
@@ -1204,13 +1212,20 @@ func (v *VoiceConnection) handleDAVEBinary(message []byte) {
 		dave.HandlePrepareTransition(transitionID, 1)
 		v.sendDAVEReadyForTransition(transitionID)
 
-		kpData, err := dave.GenerateKeyPackage()
+		// ResetForReWelcome, not GenerateKeyPackage: the commit already made this
+		// epoch's secrets useless. Keeping them is worse than having none, because
+		// receive skips authentication (DAVE's 8-byte tag is below what Go's GCM
+		// accepts), so a stale key does not fail — AES-CTR quietly turns every
+		// frame into noise. Clearing the secret makes DecryptFrame return an error
+		// and the frames get dropped instead of transcribed as garbage.
+		kpData, err := dave.ResetForReWelcome()
 		if err != nil {
 			v.log(LogError, "DAVE key package generation for re-Welcome failed: %s", err)
 			return
 		}
 		v.sendDAVEKeyPackageBinary(kpData)
 		v.sendDAVEInvalidCommitWelcome(transitionID)
+		v.watchReWelcome(daveReWelcomeTimeout)
 
 	case 30:
 		if len(payload) < 2 {
@@ -1234,6 +1249,7 @@ func (v *VoiceConnection) handleDAVEBinary(message []byte) {
 			return
 		}
 		v.log(LogInformational, "DAVE HandleWelcome OK")
+		v.noteWelcomeHandled()
 
 		if err := dave.DeriveSenderKey(); err != nil {
 			v.log(LogError, "DAVE sender key derivation failed: %s", err)

@@ -6,7 +6,60 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strconv"
+	"time"
 )
+
+// daveReWelcomeTimeout is how long to wait for the Welcome that should follow a
+// re-add request before giving up and rebuilding the connection. Discord answers
+// in well under a second when it answers at all; this is generous so a slow
+// round-trip is never mistaken for a dead session.
+const daveReWelcomeTimeout = 10 * time.Second
+
+// watchReWelcome guards the gap after an epoch change this client could not
+// follow. It cannot process MLS commits, so it asks Discord to re-add it and
+// waits for a fresh Welcome. Observed in the wild: that Welcome sometimes never
+// arrives, and nothing then recovers on its own — the session sits on a dead
+// epoch, its sender key rejected by everyone (music goes silent) and its receive
+// keys turning every incoming frame into noise (speech decodes to nothing). Both
+// directions are broken but the connection still looks healthy, so no existing
+// error path fires.
+//
+// Reconnecting is the recovery: it forces a fresh DAVE handshake. It reuses the
+// same VoiceConnection, so callers holding this pointer — players, listeners —
+// keep working across it.
+func (v *VoiceConnection) watchReWelcome(timeout time.Duration) {
+	v.Lock()
+	v.reWelcomeReq++
+	req := v.reWelcomeReq
+	v.Unlock()
+
+	go func() {
+		time.Sleep(timeout)
+
+		v.RLock()
+		stuck := v.welcomeOK < req
+		ready := v.Ready
+		v.RUnlock()
+
+		if !stuck {
+			return
+		}
+		if !ready {
+			// Already torn down or reconnecting; that path will re-handshake.
+			return
+		}
+		v.log(LogError, "DAVE re-Welcome never arrived after %s; reconnecting to recover audio", timeout)
+		v.reconnect()
+	}()
+}
+
+// noteWelcomeHandled records that a Welcome satisfied the outstanding re-add
+// request, so the watchdog stands down.
+func (v *VoiceConnection) noteWelcomeHandled() {
+	v.Lock()
+	v.welcomeOK = v.reWelcomeReq
+	v.Unlock()
+}
 
 // DecryptFrame reverses EncryptFrame for a frame received from userID.
 //
