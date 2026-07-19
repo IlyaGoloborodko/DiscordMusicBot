@@ -57,7 +57,7 @@ jobs:
             APP_PATH="${{ secrets.APP_PATH }}"
             STACK_DIR="$(dirname "$APP_PATH")"
             AI_PATH="$STACK_DIR/DiscordAiService"
-            SEARCH_PATH="$STACK_DIR/DsBotSearchService"
+            SEARCH_PATH="$STACK_DIR/media-source-service"
 
             # Fail before touching anything, and say exactly what is missing.
             # Half a stack starting up is harder to diagnose than one that

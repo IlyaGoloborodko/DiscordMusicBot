@@ -12,7 +12,7 @@ A Go Discord music + AI-DJ bot. Users control it by slash commands **and by voic
 | Vosk STT (websocket) | `VOSK_SERVER_ADDR` | 2700 | `alphacep/kaldi-ru`, wake-word gate. Always local |
 
 Python sources live outside this repo: `C:\Users\sok20\PycharmProjects\DiscordAiService`
-and `...\DsBotSearchService`.
+and `...\media-source-service`.
 
 ## Env vars
 - `AI_SERVICE_ADDR`, `AI_SERVICE_API_KEY`, `SEARCH_SERVICE_ADDR` — service endpoints.

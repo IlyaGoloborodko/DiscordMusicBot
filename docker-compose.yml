@@ -17,7 +17,7 @@
 #   /srv/discord/
 #     ├── discordAudio          <- run `docker compose up -d --build` here
 #     ├── DiscordAiService
-#     └── DsBotSearchService
+#     └── media-source-service
 #
 # Service names are the hostnames services find each other by, and they share
 # one namespace across all three files — see the addresses in `environment`
@@ -35,8 +35,8 @@
 include:
   - path: ${AI_SERVICE_PATH:-../DiscordAiService}/docker-compose.yml
     env_file: ${AI_SERVICE_PATH:-../DiscordAiService}/.env
-  - path: ${SEARCH_SERVICE_PATH:-../DsBotSearchService}/docker-compose.yml
-    env_file: ${SEARCH_SERVICE_PATH:-../DsBotSearchService}/.env
+  - path: ${SEARCH_SERVICE_PATH:-../media-source-service}/docker-compose.yml
+    env_file: ${SEARCH_SERVICE_PATH:-../media-source-service}/.env
 
 services:
   # The bot's own Redis (track cache, Telegram log queue). Named bot-redis

@@ -37,7 +37,7 @@ command STT; the AI agent and search are separate Python services.
 
 - **Go** 1.25+, a **C toolchain** (CGO — for `gopus`/libopus), and **ffmpeg** on `PATH`.
 - **Docker** for the STT containers.
-- The two Python services running (DiscordAiService, DsBotSearchService).
+- The two Python services running (DiscordAiService, media-source-service).
 - A Discord bot with the **voice** intents; it must join non-deaf to receive audio.
 
 ## Setup
@@ -66,11 +66,14 @@ The whole stack — bot, AI service, search service and their dependencies — c
 with one command. This repository's `docker-compose.yml` pulls in the other two
 services' compose files, so each stays runnable on its own.
 
+Step-by-step for a fresh Debian box — swap, Docker, clone, config — is in
+[deploy/SERVER.md](deploy/SERVER.md). The short version:
+
 **Bootstrap, once per server.** Clone the three repositories side by side:
 
 ```bash
 mkdir -p /srv/discord && cd /srv/discord
-git clone <discordAudio>       && git clone <DiscordAiService> && git clone <DsBotSearchService>
+git clone <discordAudio>       && git clone <DiscordAiService> && git clone <media-source-service>
 ```
 
 Then put each service's `.env` in place — **each service reads its own, from its own
@@ -80,8 +83,8 @@ directory**; there is no shared one:
 |---|---|
 | `discordAudio/.env` | `DISCORD_TOKEN`, `OPENAI_API_KEY` |
 | `DiscordAiService/.env` | `POSTGRES_PASSWORD` (compose refuses to start without it) |
-| `DsBotSearchService/.env` | optional; defaults work |
-| `DsBotSearchService/cookies.txt` | YouTube cookies, **LF line endings** |
+| `media-source-service/.env` | optional; defaults work |
+| `media-source-service/cookies.txt` | YouTube cookies, **LF line endings** |
 
 Service addresses (`AI_SERVICE_ADDR`, `REDIS_ADDR`, …) are *not* taken from `.env` in
 the stack: compose overrides them with container names, so the same `.env` keeps
