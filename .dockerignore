@@ -1,0 +1,21 @@
+# Keep secrets and local junk out of the build context.
+#
+# .env matters most: the bot calls godotenv.Overload(), which lets the file WIN
+# over the process environment. If it ever reached the image, it would replace
+# the compose-provided service addresses with the 127.0.0.1 ones meant for a
+# laptop, and the container would look for its dependencies inside itself.
+# Today only the multi-stage build keeps it out of the final image — that is
+# luck, not a rule.
+.env
+.env.*
+
+.git
+.github
+.idea
+.claude
+.run
+tmp/
+
+# Built on the host; the image builds its own.
+bot.exe
+*.log

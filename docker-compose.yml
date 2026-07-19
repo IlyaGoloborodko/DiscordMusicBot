@@ -1,19 +1,91 @@
-version: "3.9"
+# One command brings up the whole stack:
+#
+#   docker compose up -d --build
+#
+# This file owns the bot and the things only the bot needs. The other two
+# services are pulled in whole, through `include`: each keeps its own
+# docker-compose.yml, its own .env and its own dependencies (the AI service
+# brings its Postgres, the search service its cookie mount). Nothing here
+# reaches into their infrastructure — a service that cannot be started from its
+# own repository is a service nobody can debug alone.
+#
+# `include` needs Docker Compose v2.20+ (`docker compose version`).
+#
+# It expects the three repositories checked out side by side, and compose is run
+# from this one:
+#
+#   /srv/discord/
+#     ├── discordAudio          <- run `docker compose up -d --build` here
+#     ├── DiscordAiService
+#     └── DsBotSearchService
+#
+# Service names are the hostnames services find each other by, and they share
+# one namespace across all three files — see the addresses in `environment`
+# below. A name collision is a startup error, not a silent merge.
+#
+# The two paths are overridable from .env (AI_SERVICE_PATH, SEARCH_SERVICE_PATH)
+# because a dev checkout rarely has all three under one parent — mine has them
+# in GolandProjects and PycharmProjects. The defaults are the server layout.
+#
+# Each include names its own env_file. Without it, ${VAR} inside an included
+# file is resolved against THIS directory's .env — measured: the AI service's
+# ${POSTGRES_PASSWORD} failed to interpolate here while working fine standalone.
+# That would have pushed every service's secrets into one shared .env, which is
+# exactly the coupling `include` exists to avoid.
+include:
+  - path: ${AI_SERVICE_PATH:-../DiscordAiService}/docker-compose.yml
+    env_file: ${AI_SERVICE_PATH:-../DiscordAiService}/.env
+  - path: ${SEARCH_SERVICE_PATH:-../DsBotSearchService}/docker-compose.yml
+    env_file: ${SEARCH_SERVICE_PATH:-../DsBotSearchService}/.env
 
 services:
-  redis:
+  # The bot's own Redis (track cache, Telegram log queue). Named bot-redis
+  # because the AI service's compose already defines a `redis`, and the two hold
+  # unrelated data.
+  bot-redis:
     image: redis:7.2-alpine
-    container_name: redis
+    container_name: discord-bot-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - bot-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # The wake-word gate. Only the bot uses it, and it stays local by design: it is
+  # what keeps non-command speech from ever leaving the machine.
+  #
+  # Small model, built here rather than pulled: 222MiB resident against 5.28GiB
+  # for alphacep/kaldi-ru, with identical transcripts on the measured clips. See
+  # deploy/vosk-gate/Dockerfile for the measurement and how to fall back.
+  vosk:
+    build: ./deploy/vosk-gate
+    container_name: discord-vosk
     restart: unless-stopped
 
   bot:
     build: .
-    container_name: discord-radio-bot
+    container_name: discord-bot
     restart: unless-stopped
-
     env_file:
       - .env
-    depends_on:
-      - redis
+    # These override .env on purpose. .env holds 127.0.0.1 addresses for running
+    # the bot on a laptop; inside compose the services find each other by name.
+    # One file cannot hold both, and overriding here keeps local runs working.
     environment:
-      REDIS_ADDR: ${REDIS_ADDR}
+      REDIS_ADDR: bot-redis:6379
+      AI_SERVICE_ADDR: http://ai:8000
+      PLAYBACK_SERVICE_ADDR: http://ai:8000
+      SEARCH_SERVICE_ADDR: http://media-source-service:9000
+      VOSK_SERVER_ADDR: ws://vosk:2700
+    depends_on:
+      bot-redis:
+        condition: service_healthy
+      vosk:
+        condition: service_started
+
+volumes:
+  bot-redis-data:

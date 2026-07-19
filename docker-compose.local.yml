@@ -1,4 +1,14 @@
+# Local development overrides. Not used on the server.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# The stack's Postgres publishes 5433, which on a dev box is already taken by the
+# native postgres.exe holding the real conversation history. Moving the stack's
+# copy out of the way keeps both: the native database untouched, and the
+# container's own (empty) one reachable for inspection.
+# `!override` is required: compose *appends* list entries from a second file, so
+# a plain `ports:` here would publish 5433 as well and fail on the busy port.
 services:
-  redis:
-    ports:
-      - "6379:6379"
+  postgres:
+    ports: !override
+      - "127.0.0.1:15433:5432"

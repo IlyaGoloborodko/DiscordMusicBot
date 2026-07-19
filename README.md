@@ -60,6 +60,51 @@ command STT; the AI agent and search are separate Python services.
    go build -o bot.exe ./cmd/bot   # then run ./bot.exe (fast restarts)
    ```
 
+## Deployment (server)
+
+The whole stack — bot, AI service, search service and their dependencies — comes up
+with one command. This repository's `docker-compose.yml` pulls in the other two
+services' compose files, so each stays runnable on its own.
+
+**Bootstrap, once per server.** Clone the three repositories side by side:
+
+```bash
+mkdir -p /srv/discord && cd /srv/discord
+git clone <discordAudio>       && git clone <DiscordAiService> && git clone <DsBotSearchService>
+```
+
+Then put each service's `.env` in place — **each service reads its own, from its own
+directory**; there is no shared one:
+
+| File | Must contain at minimum |
+|---|---|
+| `discordAudio/.env` | `DISCORD_TOKEN`, `OPENAI_API_KEY` |
+| `DiscordAiService/.env` | `POSTGRES_PASSWORD` (compose refuses to start without it) |
+| `DsBotSearchService/.env` | optional; defaults work |
+| `DsBotSearchService/cookies.txt` | YouTube cookies, **LF line endings** |
+
+Service addresses (`AI_SERVICE_ADDR`, `REDIS_ADDR`, …) are *not* taken from `.env` in
+the stack: compose overrides them with container names, so the same `.env` keeps
+working for a local run against `127.0.0.1`.
+
+These files are gitignored and deploys never overwrite them — `git reset --hard`
+leaves untracked files alone, so this is a one-time step.
+
+**Deploying.** Run the *CI and Deploy* workflow (or, on the server):
+
+```bash
+cd /srv/discord/discordAudio && docker compose up -d --build
+```
+
+The workflow updates all three checkouts and refuses to start a half-configured
+stack: a missing repository, an empty `.env` or an absent `cookies.txt` fails the
+run with a message naming the file. That is deliberate — a stack that comes up
+missing one service looks like a network fault from the bot's side.
+
+Secrets used by the workflow: `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`, and
+`APP_PATH` (the path to *this* repository, e.g. `/srv/discord/discordAudio`; the
+other two are found next to it).
+
 ## Commands
 
 | Command | Action |

@@ -11,6 +11,11 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY go.mod go.sum ./
+# third_party must land before `go mod download`: go.mod redirects discordgo to
+# ./third_party/discordgo (the vendored DAVE fork), and resolving that replace
+# means reading its go.mod. Without this the download step fails outright — it
+# is a dependency, not just source.
+COPY third_party ./third_party
 RUN go mod download
 
 COPY . .
