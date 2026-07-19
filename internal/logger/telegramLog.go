@@ -56,7 +56,19 @@ func Init(ctx context.Context, l *TelegramLogger) {
 	})
 }
 
+// Send reports an error. Kept because most call sites already build their text
+// with fmt.Sprintf; Errorf is the shorter way to say the same thing.
+//
+// The returned error is about queueing, not about the log line, and every call
+// site ignores it — Errorf drops it for that reason.
 func Send(text string) error {
+	logAt(LevelError, "%s", text)
+	return nil
+}
+
+// send queues one already-composed line for Telegram. Unexported: what reaches
+// Telegram is decided by level in logAt, in one place.
+func send(text string) error {
 	if tg == nil {
 		return errors.New("telegram logger is not initialized")
 	}

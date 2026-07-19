@@ -56,7 +56,17 @@ and `...\DsBotSearchService`.
   reconnecting or a listener switching channels drops out of `VoiceStates` briefly, and
   cutting the music under someone who never left is the worse failure. A state that
   cannot be read (no session, no cached guild) never counts as an empty room.
-- `STT_LOG_LEVEL` — 0 silent / 1 commands (default) / 2 all transcripts.
+- `LOG_LEVEL` / `TG_LOG_LEVEL` — two independent levels over one call
+  (`logger.Debugf/Infof/Warnf/Errorf`): what reaches the console and what reaches
+  Telegram. `DEBUG < INFO < WARN < ERROR`, plus `OFF` for Telegram. Defaults `INFO` /
+  `ERROR` — the phone is for "something broke", not a live feed. Mirrors the AI
+  service's `LOG_LEVEL`/`TELEGRAM_LOG_LEVEL` (`app/logging_setup.py`), including
+  accepting `WARNING` as a spelling. `logger.Send` still exists and is exactly
+  `Errorf("%s", text)`. Telegram is optional: with no `TG_BOT_SECRET`/`TG_CHAT_ID` the
+  bot starts anyway (it used to `log.Fatal`) — a missing log destination must not stop
+  the music.
+- `STT_LOG_LEVEL` — 0 silent / 1 commands (default) / 2 all transcripts (separate knob,
+  it decides which transcripts get logged at all, not their severity).
 - `AI_DEBUG=1` — log raw `[ai] ->` request / `[ai] <-` response to the AI service.
 - `DJ_BREAK_EVERY` — DJ comment every N tracks (default 3).
 - `WHISPER_BIN`/`WHISPER_MODEL`/`WHISPER_SERVER_ADDR` — DEAD (local whisper removed);

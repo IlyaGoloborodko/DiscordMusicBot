@@ -3,6 +3,7 @@ package voice
 import (
 	"context"
 	"discordAudio/internal/aiService"
+	"discordAudio/internal/logger"
 	"log"
 	"os"
 	"strconv"
@@ -404,9 +405,7 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 	if voskServerAddr() == "" {
 		raw, err := transcribe(ctx, pcm)
 		if err != nil {
-			if lvl >= sttLogCommands {
-				log.Println("[stt] whisper error:", err)
-			}
+			logger.Errorf("[stt] transcribe error: %v", err)
 			return
 		}
 		text := cleanTranscript(raw)
@@ -428,9 +427,7 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 	// It decides only "worth paying the good model for", never "act on this".
 	gate, err := voskTranscribe(ctx, mono)
 	if err != nil {
-		if lvl >= sttLogCommands {
-			log.Println("[stt] vosk error:", err)
-		}
+		logger.Errorf("[stt] vosk error: %v", err)
 		return
 	}
 	l.decide(vc, pcm, gate, userID, ssrc, speechMs)
@@ -562,7 +559,7 @@ func leaveVoice(vc *discordgo.VoiceConnection) {
 		p.Stop() // clear any leftover queue so a later /join starts clean
 	}
 	if err := vc.Disconnect(); err != nil {
-		log.Printf("[voice] disconnect failed for guild %s: %v", vc.GuildID, err)
+		logger.Warnf("[voice] disconnect failed for guild %s: %v", vc.GuildID, err)
 	}
 }
 
@@ -582,7 +579,7 @@ func (l *voiceListener) openStream(sp *speaker) {
 	if err != nil {
 		sp.streamFailed = true
 		if sttLogLevel() >= sttLogCommands {
-			log.Println("[stt] vosk stream unavailable, using per-segment gate:", err)
+			logger.Warnf("[stt] vosk stream unavailable, using per-segment gate: %v", err)
 		}
 		return
 	}
@@ -620,9 +617,7 @@ func (l *voiceListener) decide(vc *discordgo.VoiceConnection, pcm []int16, gate,
 
 	raw, err := transcribe(ctx, pcm)
 	if err != nil {
-		if lvl >= sttLogCommands {
-			log.Println("[stt] transcribe error:", err)
-		}
+		logger.Errorf("[stt] transcribe error: %v", err)
 		return
 	}
 	command := cleanTranscript(raw)
@@ -720,9 +715,10 @@ func (l *voiceListener) handleAI(vc *discordgo.VoiceConnection, userID, message 
 		Tools: aiService.PlayerTools(),
 	})
 	if err != nil {
-		if lvl >= sttLogCommands {
-			log.Println("[stt] AI error:", err)
-		}
+		// Not gated on STT_LOG_LEVEL: that knob decides how much of the
+		// transcript stream is worth printing, not whether a dead AI service is
+		// worth knowing about.
+		logger.Errorf("[stt] AI error: %v", err)
 		return
 	}
 	if lvl >= sttLogCommands {

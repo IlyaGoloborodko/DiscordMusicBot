@@ -31,18 +31,25 @@ func initEnv() {
 	}
 }
 
+// loadLogger wires up Telegram logging if it is configured. It is optional: a
+// bot with no token runs exactly as before, minus the phone notifications, and
+// killing the music because a logging destination is missing would be the wrong
+// trade. Console logging always works.
 func loadLogger(ctx context.Context, rdb *redis.Client) {
 	tgCfg, err := logger.LoadTelegramConfig()
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("telegram logging is off: %v", err)
+		return
 	}
 
 	tgLogger, err := logger.NewTelegramLogger(tgCfg, rdb)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("telegram logging is off: %v", err)
+		return
 	}
 
 	logger.Init(ctx, tgLogger)
+	log.Printf("logging ready: console=%s telegram=%s", logger.ConsoleLevel(), logger.TelegramLevel())
 }
 
 func main() {
@@ -92,17 +99,15 @@ func main() {
 		log.Fatal("error opening connection,", err)
 	}
 
-	log.Println("Bot is up!")
-
 	err = discord.RegisterCommands(dg)
 	if err != nil {
 		log.Fatal("error register Discord commands,", err)
 	}
 
-	err = logger.Send("Bot is up!")
-	if err != nil {
-		log.Fatal("error sending init success log,", err)
-	}
+	// Startup is INFO, so it only reaches Telegram under TG_LOG_LEVEL=INFO. It
+	// used to go there unconditionally; at the default ERROR the phone now stays
+	// quiet on a restart.
+	logger.Infof("Bot is up!")
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
