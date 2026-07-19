@@ -47,6 +47,15 @@ and `...\DsBotSearchService`.
   `Guild.AfkTimeout` is the server's rule for moving *people* to the AFK channel, so
   connection lifetime is ours to manage. Playing or queued music counts as activity on
   its own — nobody should have to talk over an album to keep the bot around.
+- `VOICE_ALONE_TIMEOUT` — leave once the voice channel has been empty of *people* for
+  this long, whatever the player is doing (**in seconds**, default `600`, `0` disables).
+  Checked separately from the idle timeout (`aloneTooLong`), and it has to be:
+  music counting as activity plus autoplay refilling the queue means the idle timeout
+  would never fire for a bot playing to nobody, and every one of those tracks would be
+  reported to `/playback` as genuinely listened to. The default 10 minutes are grace: a client
+  reconnecting or a listener switching channels drops out of `VoiceStates` briefly, and
+  cutting the music under someone who never left is the worse failure. A state that
+  cannot be read (no session, no cached guild) never counts as an empty room.
 - `STT_LOG_LEVEL` — 0 silent / 1 commands (default) / 2 all transcripts.
 - `AI_DEBUG=1` — log raw `[ai] ->` request / `[ai] <-` response to the AI service.
 - `DJ_BREAK_EVERY` — DJ comment every N tracks (default 3).

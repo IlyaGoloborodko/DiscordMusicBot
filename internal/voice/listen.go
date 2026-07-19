@@ -56,6 +56,14 @@ const (
 	// negative disables leaving entirely.
 	defaultIdleTimeout = time.Hour
 
+	// defaultAloneTimeout: leave once the channel has been empty of people for
+	// this long, whatever the player is doing. Overridable with
+	// VOICE_ALONE_TIMEOUT, in seconds; zero or negative disables it. Not
+	// instant, because a client that reconnects or a listener who switches
+	// channels drops out of VoiceStates for a moment, and cutting the music
+	// under someone who never actually left is the worse failure.
+	defaultAloneTimeout = 10 * time.Minute
+
 	// capOverlapSamples is the audio kept when the segment cap is reached in the
 	// middle of continuous speech. It has to outlast the gate's decoding lag,
 	// measured at roughly 2s on this model — the wake word can be spoken and not
@@ -88,6 +96,11 @@ type voiceListener struct {
 	// Discord sends no packets while nobody speaks, so an idle channel simply
 	// stops touching this.
 	lastActive atomic.Int64
+
+	// aloneSince is when the last human left the voice channel (unix nanos), or
+	// 0 while somebody is still there. Separate from lastActive because playing
+	// music holds that clock open indefinitely.
+	aloneSince atomic.Int64
 }
 
 // touch marks the channel as active, holding off the idle disconnect.
@@ -423,20 +436,32 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 	l.decide(vc, pcm, gate, userID, ssrc, speechMs)
 }
 
-// idleTimeout is how long the bot stays in a silent channel. VOICE_IDLE_TIMEOUT
-// overrides it and is a plain number of seconds (3600 = an hour); zero or
-// negative means never leave. Suffixed durations ("30m") are not accepted.
-func idleTimeout() time.Duration {
-	v := strings.TrimSpace(os.Getenv("VOICE_IDLE_TIMEOUT"))
+// secondsEnv reads a timeout given as a plain number of seconds. Suffixed
+// durations ("30m") are not accepted; a value that does not parse falls back to
+// def and says so, rather than turning a timeout off by accident.
+func secondsEnv(name string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(name))
 	if v == "" {
-		return defaultIdleTimeout
+		return def
 	}
 	secs, err := strconv.Atoi(v)
 	if err != nil {
-		log.Printf("[voice] VOICE_IDLE_TIMEOUT=%q is not a number of seconds, using %s", v, defaultIdleTimeout)
-		return defaultIdleTimeout
+		log.Printf("[voice] %s=%q is not a number of seconds, using %s", name, v, def)
+		return def
 	}
 	return time.Duration(secs) * time.Second
+}
+
+// idleTimeout is how long the bot stays in a silent channel; zero or negative
+// means never leave.
+func idleTimeout() time.Duration {
+	return secondsEnv("VOICE_IDLE_TIMEOUT", defaultIdleTimeout)
+}
+
+// aloneTimeout is how long the bot keeps playing to an empty channel before it
+// leaves; zero or negative disables the check entirely.
+func aloneTimeout() time.Duration {
+	return secondsEnv("VOICE_ALONE_TIMEOUT", defaultAloneTimeout)
 }
 
 // checkIdle leaves the channel once nothing has happened for idleTimeout.
@@ -445,6 +470,16 @@ func idleTimeout() time.Duration {
 // talk over a long album for the bot to be wanted there. Speech and commands
 // touch the clock directly.
 func (l *voiceListener) checkIdle(vc *discordgo.VoiceConnection) {
+	// An empty channel is checked first and separately: music counts as activity
+	// below, and autoplay refills the queue forever, so playing to nobody would
+	// otherwise never time out — and every one of those tracks would be reported
+	// to /playback as genuinely listened to.
+	if l.aloneTooLong(vc) {
+		log.Printf("[voice] leaving guild %s: nobody in the voice channel for %s", vc.GuildID, aloneTimeout())
+		go leaveVoice(vc)
+		return
+	}
+
 	timeout := idleTimeout()
 	if timeout <= 0 {
 		return
@@ -461,6 +496,63 @@ func (l *voiceListener) checkIdle(vc *discordgo.VoiceConnection) {
 	// Off the receive loop: StopVoiceListener closes l.done, which is what ends
 	// this goroutine, and Disconnect blocks on the gateway.
 	go leaveVoice(vc)
+}
+
+// aloneTooLong tracks how long the voice channel has been without people and
+// reports whether that has run past aloneTimeout. Someone being present resets
+// the clock, and a state we cannot read leaves it untouched rather than counting
+// as an empty room.
+func (l *voiceListener) aloneTooLong(vc *discordgo.VoiceConnection) bool {
+	timeout := aloneTimeout()
+	if timeout <= 0 {
+		return false
+	}
+	alone, known := l.channelIsEmpty(vc)
+	if !known {
+		return false
+	}
+	if !alone {
+		l.aloneSince.Store(0)
+		return false
+	}
+	since := l.aloneSince.Load()
+	if since == 0 {
+		l.aloneSince.Store(time.Now().UnixNano())
+		return false
+	}
+	return time.Since(time.Unix(0, since)) >= timeout
+}
+
+// channelIsEmpty reports whether the bot is alone in its voice channel. known is
+// false when that cannot be determined — no session, no cached guild — and then
+// the caller must not act: an unreadable state is not evidence of an empty room.
+//
+// discordgo keeps VoiceStates current from gateway events, so this costs no API
+// call and can run on every tick.
+func (l *voiceListener) channelIsEmpty(vc *discordgo.VoiceConnection) (empty, known bool) {
+	if l.session == nil || l.session.State == nil || vc.ChannelID == "" {
+		return false, false
+	}
+	guild, err := l.session.State.Guild(vc.GuildID)
+	if err != nil || guild == nil {
+		return false, false
+	}
+
+	for _, vs := range guild.VoiceStates {
+		if vs.ChannelID != vc.ChannelID {
+			continue
+		}
+		if l.session.State.User != nil && vs.UserID == l.session.State.User.ID {
+			continue // ourselves
+		}
+		// Other bots do not listen either, so a channel holding only bots is
+		// still empty for our purposes.
+		if m, err := l.session.State.Member(vc.GuildID, vs.UserID); err == nil && m.User != nil && m.User.Bot {
+			continue
+		}
+		return false, true
+	}
+	return true, true
 }
 
 // leaveVoice stops listening and drops the voice connection.
