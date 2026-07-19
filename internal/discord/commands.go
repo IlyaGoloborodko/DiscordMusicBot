@@ -133,16 +133,26 @@ var (
 func RegisterCommands(s *discordgo.Session) error {
 	guilds := config.CommandGuildIDs()
 
+	// Bulk overwrite, not one create per command: it replaces the WHOLE command
+	// set for the scope, so a command dropped from `commands` disappears from
+	// Discord. ApplicationCommandCreate only ever adds, which is why /radio
+	// survived for months after its code was deleted — nothing ever removed it,
+	// and nobody could tell from the source that it was still being served.
+	want := commands
+	if !config.SupportCommands {
+		// An empty set is how you unpublish everything; the old code registered
+		// each command and then deleted it again, which briefly published them.
+		want = nil
+	}
+
 	RegisteredCommands = nil
 	for _, guildID := range guilds {
-		for _, v := range commands {
-			cmd, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, v)
-			if err != nil {
-				logger.Send(fmt.Sprintf("Cannot create '%v' command in guild %q: %v", v.Name, guildID, err))
-				continue
-			}
-			RegisteredCommands = append(RegisteredCommands, cmd)
+		created, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, guildID, want)
+		if err != nil {
+			logger.Errorf("cannot publish commands in guild %q: %v", guildID, err)
+			continue
 		}
+		RegisteredCommands = append(RegisteredCommands, created...)
 	}
 
 	if guilds[0] == "" {
@@ -151,17 +161,6 @@ func RegisterCommands(s *discordgo.Session) error {
 		log.Printf("[discord] registered %d commands in guilds %v — they exist ONLY there; clear DEBUG_GUIID to publish everywhere", len(RegisteredCommands), guilds)
 	}
 
-	if !config.SupportCommands {
-		// Delete each command from the guild it was created in — a single shared
-		// guild id would aim the deletes at the wrong server once there is more
-		// than one.
-		for _, v := range RegisteredCommands {
-			err := s.ApplicationCommandDelete(s.State.User.ID, v.GuildID, v.ID)
-			if err != nil {
-				logger.Send(fmt.Sprintf("Cannot delete '%v' command: %v", v.Name, err))
-			}
-		}
-	}
 	s.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		// Запускаем обработку каждой команды в отдельной горутине
 		switch i.Type {
