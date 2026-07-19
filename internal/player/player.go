@@ -645,6 +645,7 @@ func (p *Player) djLine() string {
 		Session: aiService.AgentSession{GuildID: p.guildID, ChannelID: p.chID()},
 		Message: "[dj_break] Say one short, upbeat DJ transition line to bridge into the next song. " +
 			"Do not search and do not change the queue.",
+		Trigger: aiService.TriggerDJBreak,
 		Context: map[string]any{
 			"now_playing": p.nowPlaying.Title,
 			"queue_len":   len(p.queue),
@@ -670,6 +671,7 @@ func (p *Player) requestMore() bool {
 		Session: aiService.AgentSession{GuildID: p.guildID, ChannelID: p.chID()},
 		Message: "[autoplay] The queue just ended. Give a short spoken DJ comment and " +
 			"pick the next set of tracks to keep the same vibe going.",
+		Trigger: aiService.TriggerAutoplay,
 		Context: map[string]any{
 			"last_played": p.nowPlaying.Title,
 			"queue_len":   0,

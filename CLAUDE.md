@@ -41,7 +41,8 @@ and `...\DsBotSearchService`.
   length of the utterance. Off by default; the per-utterance path stays as fallback and
   is used automatically if the dial fails.
 - `VOICE_IDLE_TIMEOUT` — leave the voice channel after this long with no speech, no
-  commands and nothing playing or queued (default `1h`, `0` disables). discordgo has
+  commands and nothing playing or queued (**in seconds**, default `3600`, `0` disables;
+  suffixed durations like `30m` are not accepted). discordgo has
   nothing for this: `UpdateGameStatus(idle …)` is the bot's presence and
   `Guild.AfkTimeout` is the server's rule for moving *people* to the AFK channel, so
   connection lifetime is ours to manage. Playing or queued music counts as activity on

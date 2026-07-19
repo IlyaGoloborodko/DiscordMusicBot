@@ -5,6 +5,7 @@ import (
 	"discordAudio/internal/aiService"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,7 +52,7 @@ const (
 	streamIdleTimeout = 60 * time.Second
 
 	// defaultIdleTimeout: leave the voice channel after this long with nothing
-	// happening. Overridable with VOICE_IDLE_TIMEOUT (e.g. "30m"); zero or
+	// happening. Overridable with VOICE_IDLE_TIMEOUT, in seconds; zero or
 	// negative disables leaving entirely.
 	defaultIdleTimeout = time.Hour
 
@@ -423,18 +424,19 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 }
 
 // idleTimeout is how long the bot stays in a silent channel. VOICE_IDLE_TIMEOUT
-// overrides it (any Go duration); zero or negative means never leave.
+// overrides it and is a plain number of seconds (3600 = an hour); zero or
+// negative means never leave. Suffixed durations ("30m") are not accepted.
 func idleTimeout() time.Duration {
 	v := strings.TrimSpace(os.Getenv("VOICE_IDLE_TIMEOUT"))
 	if v == "" {
 		return defaultIdleTimeout
 	}
-	d, err := time.ParseDuration(v)
+	secs, err := strconv.Atoi(v)
 	if err != nil {
-		log.Printf("[voice] VOICE_IDLE_TIMEOUT=%q is not a duration, using %s", v, defaultIdleTimeout)
+		log.Printf("[voice] VOICE_IDLE_TIMEOUT=%q is not a number of seconds, using %s", v, defaultIdleTimeout)
 		return defaultIdleTimeout
 	}
-	return d
+	return time.Duration(secs) * time.Second
 }
 
 // checkIdle leaves the channel once nothing has happened for idleTimeout.
@@ -616,6 +618,7 @@ func (l *voiceListener) handleAI(vc *discordgo.VoiceConnection, userID, message 
 	resp, err := ai.Agent(ctx, aiService.AgentRequest{
 		Session: l.agentSession(vc.GuildID, userID),
 		Message: message,
+		Trigger: aiService.TriggerUser,
 		Context: map[string]any{
 			"now_playing": now,
 			"queue":       queue,

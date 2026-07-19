@@ -51,9 +51,24 @@ type ToolCall struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
+// What caused a call to /agent. The service treats everything except
+// TriggerUser as the bot acting on its own, and then refuses to re-serve music
+// that just played: repeating the last hour is what a listener asks for, not
+// what autoplay should decide by itself.
+//
+// This is a contract, unlike the "[autoplay]" prefix in Message — that prefix is
+// our own formatting and we are free to reword it, which would break a service
+// that had come to depend on reading it.
+const (
+	TriggerUser     = "user"     // a person spoke or typed at the bot
+	TriggerAutoplay = "autoplay" // the queue ran dry and the bot asked for more
+	TriggerDJBreak  = "dj_break" // the periodic DJ line between tracks
+)
+
 type AgentRequest struct {
 	Session AgentSession   `json:"session"`
 	Message string         `json:"message"`
+	Trigger string         `json:"trigger,omitempty"`
 	Context map[string]any `json:"context,omitempty"`
 	Tools   []Tool         `json:"tools,omitempty"`
 }

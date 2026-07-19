@@ -33,6 +33,7 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	resp, err := ai.Agent(ctx, aiService.AgentRequest{
 		Session: agentSession(i),
 		Message: userMessage,
+		Trigger: aiService.TriggerUser,
 		Context: map[string]any{
 			"now_playing": now,
 			"queue":       queue,

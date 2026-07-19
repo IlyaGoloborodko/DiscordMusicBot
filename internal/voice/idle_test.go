@@ -12,8 +12,12 @@ func TestIdleTimeoutFromEnv(t *testing.T) {
 		want time.Duration
 	}{
 		{"unset falls back to an hour", "", time.Hour},
-		{"explicit duration", "30m", 30 * time.Minute},
-		{"seconds, for testing", "5s", 5 * time.Second},
+		// A bare number is seconds — the documented form.
+		{"bare seconds", "3600", time.Hour},
+		{"small bare value is seconds, not nanos", "5", 5 * time.Second},
+		// Seconds are the only accepted form; a Go duration is not one.
+		{"suffixed duration is rejected", "30m", time.Hour},
+		{"suffixed seconds are rejected", "5s", time.Hour},
 		// Zero is the documented way to keep the bot in the channel forever.
 		{"zero disables leaving", "0", 0},
 		// A typo must not silently turn the feature off or leave instantly.
