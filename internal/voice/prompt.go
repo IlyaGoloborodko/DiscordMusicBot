@@ -47,16 +47,11 @@ func ProcessPrompt(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 		return err
 	}
 
-	// Acknowledge in the originating interaction; the spoken answer and music
-	// playback are handled by the player.
-	ack := resp.DisplayText
-	if resp.Action == aiService.ActionClarify && resp.Clarification != "" {
-		ack = resp.Clarification
-	}
-	if ack == "" {
-		ack = "Ок"
-	}
-	followup(s, i, ack)
+	// Close the interaction privately. The visible answer — display text,
+	// clarification, and the spoken reply — is posted by the player, which is the
+	// single place that happens. A public followup here repeated the same line
+	// (ApplyAgent → announce), so the channel showed every /prompt answer twice.
+	followupEphemeral(s, i, "Ок")
 
 	p.ApplyAgent(resp)
 	return nil
