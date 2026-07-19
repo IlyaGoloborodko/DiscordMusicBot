@@ -40,6 +40,12 @@ and `...\DsBotSearchService`.
   and flat**, versus 600-720ms for the per-utterance path, which also grows with the
   length of the utterance. Off by default; the per-utterance path stays as fallback and
   is used automatically if the dial fails.
+- `VOICE_IDLE_TIMEOUT` — leave the voice channel after this long with no speech, no
+  commands and nothing playing or queued (default `1h`, `0` disables). discordgo has
+  nothing for this: `UpdateGameStatus(idle …)` is the bot's presence and
+  `Guild.AfkTimeout` is the server's rule for moving *people* to the AFK channel, so
+  connection lifetime is ours to manage. Playing or queued music counts as activity on
+  its own — nobody should have to talk over an album to keep the bot around.
 - `STT_LOG_LEVEL` — 0 silent / 1 commands (default) / 2 all transcripts.
 - `AI_DEBUG=1` — log raw `[ai] ->` request / `[ai] <-` response to the AI service.
 - `DJ_BREAK_EVERY` — DJ comment every N tracks (default 3).

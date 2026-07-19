@@ -4,7 +4,10 @@ import (
 	"context"
 	"discordAudio/internal/aiService"
 	"log"
+	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -47,6 +50,11 @@ const (
 	// speakers should not sit on them; reconnecting costs one dial.
 	streamIdleTimeout = 60 * time.Second
 
+	// defaultIdleTimeout: leave the voice channel after this long with nothing
+	// happening. Overridable with VOICE_IDLE_TIMEOUT (e.g. "30m"); zero or
+	// negative disables leaving entirely.
+	defaultIdleTimeout = time.Hour
+
 	// capOverlapSamples is the audio kept when the segment cap is reached in the
 	// middle of continuous speech. It has to outlast the gate's decoding lag,
 	// measured at roughly 2s on this model — the wake word can be spoken and not
@@ -74,6 +82,18 @@ type voiceListener struct {
 
 	armed sync.Map      // uint32 ssrc -> time.Time: command follow-up window after a wake word
 	done  chan struct{} // closed on disconnect to stop run()
+
+	// lastActive is when something last happened in the channel (unix nanos).
+	// Discord sends no packets while nobody speaks, so an idle channel simply
+	// stops touching this.
+	lastActive atomic.Int64
+}
+
+// touch marks the channel as active, holding off the idle disconnect.
+func (l *voiceListener) touch() { l.lastActive.Store(time.Now().UnixNano()) }
+
+func (l *voiceListener) idleFor() time.Duration {
+	return time.Since(time.Unix(0, l.lastActive.Load()))
 }
 
 // chID returns the text channel the listener currently answers in.
@@ -163,11 +183,14 @@ func StartVoiceListener(s *discordgo.Session, vc *discordgo.VoiceConnection, cha
 		listenMu.Unlock()
 		// Already listening: point it at the channel the command came from rather
 		// than dropping the update, or it keeps answering in the first /join
-		// channel forever.
+		// channel forever. A command is also activity — every slash command that
+		// touches voice comes through here.
 		l.setChID(channelID)
+		l.touch()
 		return
 	}
 	l := &voiceListener{session: s, channelID: channelID, done: make(chan struct{})}
+	l.touch()
 	listeners[vc] = l
 	listenMu.Unlock()
 
@@ -230,6 +253,7 @@ func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
 				continue
 			}
 			sp.last = time.Now()
+			l.touch() // somebody is speaking
 
 			if voskStreaming() && !sp.streamFailed {
 				if sp.stream == nil {
@@ -254,6 +278,7 @@ func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
 
 		case <-ticker.C:
 			now := time.Now()
+			l.checkIdle(vc)
 
 			for ssrc, sp := range speakers {
 				sp.mu.Lock()
@@ -395,6 +420,56 @@ func (l *voiceListener) process(vc *discordgo.VoiceConnection, pcm []int16, user
 		return
 	}
 	l.decide(vc, pcm, gate, userID, ssrc, speechMs)
+}
+
+// idleTimeout is how long the bot stays in a silent channel. VOICE_IDLE_TIMEOUT
+// overrides it (any Go duration); zero or negative means never leave.
+func idleTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv("VOICE_IDLE_TIMEOUT"))
+	if v == "" {
+		return defaultIdleTimeout
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Printf("[voice] VOICE_IDLE_TIMEOUT=%q is not a duration, using %s", v, defaultIdleTimeout)
+		return defaultIdleTimeout
+	}
+	return d
+}
+
+// checkIdle leaves the channel once nothing has happened for idleTimeout.
+//
+// Playing or queued music counts as activity in its own right — nobody has to
+// talk over a long album for the bot to be wanted there. Speech and commands
+// touch the clock directly.
+func (l *voiceListener) checkIdle(vc *discordgo.VoiceConnection) {
+	timeout := idleTimeout()
+	if timeout <= 0 {
+		return
+	}
+	if p, ok := playerManager.Lookup(vc.GuildID); ok && p.Busy() {
+		l.touch()
+		return
+	}
+	if l.idleFor() < timeout {
+		return
+	}
+
+	log.Printf("[voice] leaving guild %s after %s without activity", vc.GuildID, timeout)
+	// Off the receive loop: StopVoiceListener closes l.done, which is what ends
+	// this goroutine, and Disconnect blocks on the gateway.
+	go leaveVoice(vc)
+}
+
+// leaveVoice stops listening and drops the voice connection.
+func leaveVoice(vc *discordgo.VoiceConnection) {
+	StopVoiceListener(vc)
+	if p, ok := playerManager.Lookup(vc.GuildID); ok {
+		p.Stop() // clear any leftover queue so a later /join starts clean
+	}
+	if err := vc.Disconnect(); err != nil {
+		log.Printf("[voice] disconnect failed for guild %s: %v", vc.GuildID, err)
+	}
 }
 
 // openStream gives a speaker their own live gate connection. On failure the

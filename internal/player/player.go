@@ -305,6 +305,17 @@ func (p *Player) Enqueue(tracks []aiService.Track) {
 	p.send(command{kind: cmdAgent, action: aiService.ActionEnqueue, tracks: tracks})
 }
 
+// Busy reports whether the player is doing anything that should keep the bot in
+// the channel: a track streaming, or one still queued behind it. Paused counts —
+// someone paused deliberately and means to come back to it.
+func (p *Player) Busy() bool {
+	if p.musicPlaying.Load() {
+		return true
+	}
+	_, queue := p.Snapshot()
+	return len(queue) > 0
+}
+
 func (p *Player) Skip() { p.send(command{kind: cmdSkip}) }
 func (p *Player) Stop() { p.send(command{kind: cmdStop}) }
 
