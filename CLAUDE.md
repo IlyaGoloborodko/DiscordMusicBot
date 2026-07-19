@@ -134,6 +134,17 @@ The two stages have **opposite jobs**. Keep them that way; `stt_test.go` locks i
    transcription (~$0.0002) and no wrong action. Skipped when `armed` (in a follow-up the
    name was in the previous segment).
 
+**Renaming the bot** = `WAKE_WORDS`, `WAKE_WORDS_NEAR` and `STT_PROMPT` in `.env`, all
+three together (each falls back to the shipped Russian defaults when blank; entries are
+normalized, so `Алиса` in `.env` matches `алиса,` in a transcript). The failure this
+invites is renaming only `WAKE_WORDS`: stage 1 then nominates mishearings of the *old*
+name, nothing reaches stage 2, and the bot hears its name and does nothing — with every
+list looking sane in isolation. `voice.CheckWakeWordConfig()` runs at startup and logs an
+ERROR (so it reaches Telegram) if no wake word is covered by the near list.
+The echo marker is **derived** from `STT_PROMPT`'s first sentence (`promptEcho`), not
+listed separately — it used to be a second hand-kept copy, and a rename that updated only
+the prompt would have disarmed the defence silently.
+
 **Why:** Vosk's big model has an open vocabulary, and its language model prefers "машина"
 (common noun) over "марина" (a name) on near-identical acoustics. Observed live:
 `VOSK="я машина как дела"` for "Марина, как дела" → the bot ignored the user. Demanding an

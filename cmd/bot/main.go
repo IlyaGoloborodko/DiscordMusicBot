@@ -72,6 +72,7 @@ func main() {
 	voice.InitTrackCache(trackCache)
 
 	voice.InitPlayerManager(player.NewManager())
+	voice.CheckWakeWordConfig()
 
 	token := os.Getenv("DISCORD_TOKEN")
 	if token == "" {

@@ -3,10 +3,12 @@ package voice
 import (
 	"bytes"
 	"context"
+	"discordAudio/internal/logger"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -28,14 +30,19 @@ const (
 )
 
 // wakeWords are normalized (lowercase, ё→е) trigger phrases. The bot treats an
-// utterance as an AI command only if it contains one of these ("Марина" and how
-// whisper/vosk tend to hear it). Matching is substring-based, so "марин" also
-// catches марину/марине/маринка etc. Extend freely.
-var wakeWords = []string{
+// utterance as an AI command only if it contains one of these. Matching is
+// substring-based, so "марин" also catches марину/марине/маринка etc.
+//
+// Overridable with WAKE_WORDS (comma-separated). Renaming the bot means setting
+// WAKE_WORDS, WAKE_WORDS_NEAR and STT_PROMPT together — the two lists have
+// opposite jobs, see nearWakeWords.
+var defaultWakeWords = []string{
 	"марин", "марина", "маринка", "мариночка",
 	"мариш", "мариша", "маришка",
 	"marina", "marin",
 }
+
+func wakeWords() []string { return wordListEnv("WAKE_WORDS", defaultWakeWords) }
 
 // nearWakeWords is the LOOSE first stage, matched against the Vosk gate only.
 // It deliberately contains real words that are not the wake word: the big Vosk
@@ -50,16 +57,65 @@ var wakeWords = []string{
 //
 // Do not "fix" this by adding these words to wakeWords instead: "включи Машину
 // времени" would then wake the bot for real.
-var nearWakeWords = []string{
+//
+// Overridable with WAKE_WORDS_NEAR (comma-separated). Fill it with how the cheap
+// model *mishears* the name, not with the name's own forms — copying WAKE_WORDS
+// into it brings back the bug this two-list design exists to fix.
+var defaultNearWakeWords = []string{
 	"мари", "машин", "малин", "морин", "марьин", "мурин",
 	"marin", "machin",
+}
+
+func nearWakeWords() []string { return wordListEnv("WAKE_WORDS_NEAR", defaultNearWakeWords) }
+
+// wordListEnv reads a comma-separated list of wake words, normalized the same
+// way transcripts are (lowercase, ё→е) so an entry typed as "Марина" in .env
+// still matches.
+//
+// An empty or all-blank value falls back to def rather than yielding an empty
+// list: a stray "WAKE_WORDS=" would otherwise leave a bot that never answers to
+// anything, and nothing in the logs would say why.
+func wordListEnv(name string, def []string) []string {
+	raw := os.Getenv(name)
+	if strings.TrimSpace(raw) == "" {
+		return def
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if w := strings.TrimSpace(normalize(part)); w != "" {
+			out = append(out, w)
+		}
+	}
+	if len(out) == 0 {
+		log.Printf("[stt] %s has no usable words, keeping the defaults", name)
+		return def
+	}
+	return out
+}
+
+// CheckWakeWordConfig reports wake-word settings that would leave the bot deaf,
+// at startup rather than in the middle of a party.
+//
+// The trap this exists for: WAKE_WORDS is renamed and WAKE_WORDS_NEAR is left at
+// its defaults. Stage 1 then nominates only mishearings of the *old* name, so
+// nothing ever reaches the strict check and the bot never answers — while every
+// list involved looks perfectly reasonable on its own.
+func CheckWakeWordConfig() {
+	for _, w := range wakeWords() {
+		if containsNearWake(w) {
+			return
+		}
+	}
+	logger.Errorf("[stt] no wake word in WAKE_WORDS is matched by WAKE_WORDS_NEAR (%v vs %v): "+
+		"the cheap gate will never nominate an utterance and the bot will not respond to its name",
+		wakeWords(), nearWakeWords())
 }
 
 // containsNearWake reports whether the cheap gate heard anything close enough to
 // the wake word to be worth spending the accurate model on.
 func containsNearWake(text string) bool {
 	n := normalize(text)
-	for _, w := range nearWakeWords {
+	for _, w := range nearWakeWords() {
 		if strings.Contains(n, w) {
 			return true
 		}
@@ -199,7 +255,7 @@ func normalize(s string) string {
 
 func containsWakeWord(text string) bool {
 	n := normalize(text)
-	for _, w := range wakeWords {
+	for _, w := range wakeWords() {
 		if strings.Contains(n, w) {
 			return true
 		}
@@ -214,7 +270,7 @@ func stripWakeWord(text string) (command string, ok bool) {
 	words := strings.Fields(text)
 	for idx, w := range words {
 		nw := strings.TrimSpace(normalize(w))
-		for _, wake := range wakeWords {
+		for _, wake := range wakeWords() {
 			if strings.Contains(nw, wake) {
 				return strings.TrimSpace(strings.Join(words[idx+1:], " ")), true
 			}
@@ -228,9 +284,30 @@ func stripWakeWord(text string) (command string, ok bool) {
 // tokens of the prompt and weighs later tokens more, so keep it short and put
 // the domain words at the end. This is contextual biasing: it buys most of what
 // "training the model on our keywords" would, for free and at inference time.
-const whisperPrompt = "Разговор с ботом Мариной. Марина, включи музыку. Марина, поставь на паузу. " +
+// Overridable with STT_PROMPT. Its FIRST SENTENCE doubles as the echo defence
+// below, so keep it something no real user would say.
+const defaultWhisperPrompt = "Разговор с ботом Мариной. Марина, включи музыку. Марина, поставь на паузу. " +
 	"Марина, продолжи. Марина, сделай погромче. Марина, потише. Марина, пропусти трек. " +
 	"Марина, что в очереди? Марина, останови."
+
+func whisperPrompt() string {
+	if p := strings.TrimSpace(os.Getenv("STT_PROMPT")); p != "" {
+		return p
+	}
+	return defaultWhisperPrompt
+}
+
+// promptEcho is the prompt's first sentence, normalized for matching. Fed
+// non-speech, the model parrots the prompt back as the transcript, and that echo
+// carries the wake word — so it would hand the AI a phantom command.
+//
+// Derived rather than listed: the marker and the prompt used to be two copies of
+// one sentence, and a rename that updated only the prompt would have quietly
+// disarmed the defence with nothing to notice it.
+func promptEcho() string {
+	first, _, _ := strings.Cut(whisperPrompt(), ".")
+	return strings.TrimSpace(reSpaces.ReplaceAllString(normalize(first), " "))
+}
 
 // transcribe turns a captured utterance (48kHz stereo PCM) into command text.
 //
@@ -298,7 +375,7 @@ func openaiTranscribe(ctx context.Context, pcm []int16) (string, error) {
 	for field, value := range map[string]string{
 		"model":           openaiSTTModel(),
 		"language":        "ru",
-		"prompt":          whisperPrompt,
+		"prompt":          whisperPrompt(),
 		"response_format": "text",
 	} {
 		if err := mw.WriteField(field, value); err != nil {
@@ -376,15 +453,7 @@ var (
 		"редактор субтитров", "корректор", "субтитры",
 		"подпишись", "продолжение следует", "спасибо за просмотр",
 		"ставьте лайк", "amara", "dimatorzok",
-		// Prompt echo: fed non-speech, the model parrots the prompt back as the
-		// transcript — measured, silence and noise both returned "Разговор с
-		// ботом Мариной." verbatim, which carries the wake word and would hand
-		// the AI a phantom command. The retired local backend had vad_filter to
-		// suppress it; the OpenAI API has no such knob, so this line and the Vosk
-		// gate are now the whole defence. whisperPrompt opens with that sentence
-		// precisely so the echo stays recognisable — keep its first sentence
-		// something no real user would ever say.
-		"разговор с ботом мариной",
+		// Prompt echo is handled separately, by promptEcho() — see cleanTranscript.
 	}
 )
 
@@ -403,6 +472,11 @@ func cleanTranscript(s string) string {
 		if strings.Contains(n, m) {
 			return ""
 		}
+	}
+	// The OpenAI API has no vad_filter, so this and the Vosk gate are the whole
+	// defence against the model echoing our own prompt back at us.
+	if echo := promptEcho(); echo != "" && strings.Contains(n, echo) {
+		return ""
 	}
 	return s
 }

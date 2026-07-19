@@ -88,7 +88,7 @@ func TestWakeCascade(t *testing.T) {
 // Stage 1 must never be narrower than stage 2, or a real wake word could pass the
 // strict check while never being nominated for it in the first place.
 func TestNearWakeCoversEveryWakeWord(t *testing.T) {
-	for _, w := range wakeWords {
+	for _, w := range wakeWords() {
 		if !containsNearWake(w) {
 			t.Errorf("wake word %q passes containsWakeWord but not containsNearWake — "+
 				"stage 1 would drop it before stage 2 ever saw it", w)
