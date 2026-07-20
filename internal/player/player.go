@@ -278,6 +278,49 @@ func (p *Player) send(c command) {
 	}
 }
 
+// idSet indexes tracks by id. Tracks with an empty id are left out: they cannot
+// be told apart, so they are never treated as duplicates of each other.
+func idSet(tracks []aiService.Track) map[string]bool {
+	ids := make(map[string]bool, len(tracks))
+	for _, t := range tracks {
+		if t.ID != "" {
+			ids[t.ID] = true
+		}
+	}
+	return ids
+}
+
+// withoutIDs returns tracks whose id is not in drop, preserving order.
+func withoutIDs(tracks []aiService.Track, drop map[string]bool) []aiService.Track {
+	kept := make([]aiService.Track, 0, len(tracks))
+	for _, t := range tracks {
+		if t.ID != "" && drop[t.ID] {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	return kept
+}
+
+// dedupeTracks keeps the first occurrence of each id and skips ids in exclude
+// (pass nil to exclude nothing). An id-less track is always kept — dropping
+// those would silently lose real tracks whenever the search service returns one
+// without an id.
+func dedupeTracks(tracks []aiService.Track, exclude map[string]bool) []aiService.Track {
+	seen := make(map[string]bool, len(tracks))
+	out := make([]aiService.Track, 0, len(tracks))
+	for _, t := range tracks {
+		if t.ID != "" {
+			if seen[t.ID] || exclude[t.ID] {
+				continue
+			}
+			seen[t.ID] = true
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
 // ApplyAgent submits an agent result to the player, reducing its tool calls (or
 // the legacy action) to a single queue/transport effect.
 func (p *Player) ApplyAgent(r *aiService.AgentResponse) {
@@ -411,14 +454,25 @@ func (p *Player) handle(c command) {
 func (p *Player) applyAgent(c command) {
 	switch c.action {
 	case aiService.ActionReplaceQueue:
-		p.queue = append([]aiService.Track{}, c.tracks...)
+		p.queue = dedupeTracks(c.tracks, nil)
 		p.sinceBreak = 0
 	case aiService.ActionPlay:
-		// Play now: jump these to the front of the queue.
-		p.queue = append(append([]aiService.Track{}, c.tracks...), p.queue...)
+		// Play now: jump these to the front. Any copy already sitting in the
+		// queue is dropped first, so this MOVES a known track forward instead of
+		// creating a second entry for it — the agent re-sends the same set
+		// routinely (it cannot see our queue), and prepending blindly is what
+		// turned a queue of 4 into 8.
+		fresh := dedupeTracks(c.tracks, nil)
+		p.queue = append(fresh, withoutIDs(p.queue, idSet(fresh))...)
 		p.sinceBreak = 0
 	case aiService.ActionEnqueue:
-		p.queue = append(p.queue, c.tracks...)
+		// Skip what is already queued or playing: appending it would make the
+		// listener hear the same track twice and report two plays to /playback.
+		have := idSet(p.queue)
+		if p.nowPlaying.ID != "" {
+			have[p.nowPlaying.ID] = true
+		}
+		p.queue = append(p.queue, dedupeTracks(c.tracks, have)...)
 	case aiService.ActionSkip:
 		// Current playback was already cancelled (preempt); the loop advances.
 	case aiService.ActionStop:
