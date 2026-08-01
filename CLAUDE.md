@@ -346,6 +346,13 @@ at it — and neither service ends up owning the other's settings.
   test for this package.
 - **The service token never reaches the browser.** It is attached server-side, so a
   stolen session cannot be replayed against the backends directly.
+- **The gateway is the one service in compose without `env_file: .env`.** It gets its
+  variables listed one by one instead. Loading the whole file would put
+  `DISCORD_TOKEN`, `OPENAI_API_KEY`, `TG_BOT_SECRET` and `POSTGRES_PASSWORD` into the
+  environment of the only process reachable from the internet; the code never reads
+  them, but a compromised process can read `/proc/self/environ`. `DISCORD_CLIENT_SECRET`
+  is **not** the bot token — it can only exchange authorization codes, never control
+  the bot, which is exactly why the bot token has no business being in there.
 - **Access lists are env** (`ADMIN_OWNER_IDS` / `_MODERATOR_IDS` / `_VIEWER_IDS`), not a
   database: adding someone is a `.env` edit and a restart, and there is no bootstrap
   problem or "last owner removed" trap. Empty lists are a **startup refusal** — "no

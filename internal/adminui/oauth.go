@@ -34,13 +34,13 @@ const (
 // authorization code and quietly log that person into the attacker's account.
 func (g *Gateway) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if g.oauthUnconfigured() {
-		http.Error(w, "Discord OAuth2 is not configured on this gateway", http.StatusServiceUnavailable)
+		http.Error(w, "Вход через Discord не настроен на этом сервере", http.StatusServiceUnavailable)
 		return
 	}
 
 	state, err := randomToken()
 	if err != nil {
-		http.Error(w, "cannot start login", http.StatusInternalServerError)
+		http.Error(w, "Не удалось начать вход", http.StatusInternalServerError)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -68,7 +68,7 @@ func (g *Gateway) handleLogin(w http.ResponseWriter, r *http.Request) {
 // ask Discord who it belongs to, and check that person against the access lists.
 func (g *Gateway) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if g.oauthUnconfigured() {
-		http.Error(w, "Discord OAuth2 is not configured on this gateway", http.StatusServiceUnavailable)
+		http.Error(w, "Вход через Discord не настроен на этом сервере", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -77,14 +77,14 @@ func (g *Gateway) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil || got == "" || want.Value != got {
 		// Deliberately vague to the browser; the reason is in the log.
 		g.logf("[adminui] login rejected: state mismatch from %s", r.RemoteAddr)
-		http.Error(w, "login expired or invalid, please try again", http.StatusBadRequest)
+		http.Error(w, "Сессия входа истекла или недействительна — попробуйте ещё раз", http.StatusBadRequest)
 		return
 	}
 	g.clearCookie(w, stateCookie)
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		http.Error(w, "no authorization code", http.StatusBadRequest)
+		http.Error(w, "Discord не передал код авторизации", http.StatusBadRequest)
 		return
 	}
 
@@ -94,13 +94,13 @@ func (g *Gateway) handleCallback(w http.ResponseWriter, r *http.Request) {
 	token, err := g.exchangeCode(ctx, code)
 	if err != nil {
 		g.logf("[adminui] token exchange failed: %v", err)
-		http.Error(w, "could not complete the Discord login", http.StatusBadGateway)
+		http.Error(w, "Не удалось завершить вход через Discord", http.StatusBadGateway)
 		return
 	}
 	user, err := g.discordUser(ctx, token)
 	if err != nil {
 		g.logf("[adminui] fetching the Discord user failed: %v", err)
-		http.Error(w, "could not complete the Discord login", http.StatusBadGateway)
+		http.Error(w, "Не удалось завершить вход через Discord", http.StatusBadGateway)
 		return
 	}
 
@@ -109,7 +109,7 @@ func (g *Gateway) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// Logged, because "I can't get in" is otherwise unanswerable — this line
 		// carries the exact id to add to the env lists.
 		g.logf("[adminui] access denied for Discord user %s (%s): not in any ADMIN_*_IDS list", user.ID, user.Username)
-		http.Error(w, "This Discord account does not have access to the panel.", http.StatusForbidden)
+		http.Error(w, "У этого аккаунта Discord нет доступа к панели.", http.StatusForbidden)
 		return
 	}
 
@@ -120,7 +120,7 @@ func (g *Gateway) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Expires:  time.Now().Add(sessionTTL).Unix(),
 	}
 	if err := g.setSession(w, sess); err != nil {
-		http.Error(w, "cannot start session", http.StatusInternalServerError)
+		http.Error(w, "Не удалось создать сессию", http.StatusInternalServerError)
 		return
 	}
 	g.logf("[adminui] %s (%s) signed in as %s", user.Username, user.ID, role)

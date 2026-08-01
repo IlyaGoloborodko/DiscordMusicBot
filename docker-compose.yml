@@ -111,12 +111,36 @@ services:
       dockerfile: deploy/admin/Dockerfile
     container_name: discord-admin
     restart: unless-stopped
-    env_file:
-      - .env
+    # Deliberately NOT `env_file: .env`, unlike every other service here. That
+    # would hand this container the whole file — DISCORD_TOKEN, OPENAI_API_KEY,
+    # TG_BOT_SECRET, POSTGRES_PASSWORD — and this is the one process reachable
+    # from the internet. The code never reads them, but a process that is
+    # compromised can read its own environment, so it is only given what it
+    # actually needs. Values still come from .env, one at a time.
     environment:
       BOT_ADMIN_ADDR: http://bot:8090
       AI_ADMIN_ADDR: http://ai:8000
       ADMIN_CERT_CACHE: /data/certs
+
+      # Service tokens for the two backends. Never sent to the browser.
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      AI_ADMIN_API_KEY: ${AI_ADMIN_API_KEY:-}
+
+      # Who may sign in, and as what.
+      ADMIN_OWNER_IDS: ${ADMIN_OWNER_IDS:-}
+      ADMIN_MODERATOR_IDS: ${ADMIN_MODERATOR_IDS:-}
+      ADMIN_VIEWER_IDS: ${ADMIN_VIEWER_IDS:-}
+
+      # Discord OAuth2. The CLIENT SECRET is not the bot token: it can only
+      # exchange authorization codes, never control the bot — which is why the
+      # bot token has no business being in this container.
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL:-}
+
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-}
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:-}
+      ADMIN_UI_ADDR: ${ADMIN_UI_ADDR:-:8080}
     volumes:
       # Certificates outlive the container: Let's Encrypt rate-limits issuance,
       # and rebuilding the image must not spend that budget every deploy.

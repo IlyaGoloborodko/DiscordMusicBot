@@ -49,9 +49,11 @@ func (g *Gateway) newProxy(target *url.URL, token, prefix string) *httputil.Reve
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			// A backend being down is normal during a deploy and must read as
 			// such in the panel, not as a panel bug.
+			// The log line is English like the rest of the code; the message is
+			// Russian because it is rendered in the panel, next to Russian labels.
 			g.logf("[adminui] %s %s: %v", r.Method, r.URL.Path, err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{
-				"error": "the service is not responding",
+				"error": "Сервис не отвечает",
 			})
 		},
 	}
