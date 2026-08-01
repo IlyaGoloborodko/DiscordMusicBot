@@ -54,6 +54,29 @@ func loadLogger(ctx context.Context, rdb *redis.Client) {
 	log.Printf("logging ready: console=%s telegram=%s", logger.ConsoleLevel(), logger.TelegramLevel())
 }
 
+// guildNames reads the guild list out of discordgo's state cache, which the
+// library keeps current from gateway events — so this costs no API call and can
+// be called per request.
+//
+// The lock is discordgo's own: State embeds an RWMutex and mutates the guild
+// objects in place on GUILD_CREATE (`*g = *guild`), so reading Name without
+// holding it is a genuine race, not a formality.
+func guildNames(s *discordgo.Session) []adminapi.Guild {
+	if s == nil || s.State == nil {
+		return nil
+	}
+	s.State.RLock()
+	defer s.State.RUnlock()
+
+	out := make([]adminapi.Guild, 0, len(s.State.Guilds))
+	for _, g := range s.State.Guilds {
+		if g != nil {
+			out = append(out, adminapi.Guild{ID: g.ID, Name: g.Name})
+		}
+	}
+	return out
+}
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -122,6 +145,7 @@ func main() {
 		Players:     players,
 		Events:      events,
 		VoiceStatus: voice.Status,
+		Guilds:      func() []adminapi.Guild { return guildNames(dg) },
 	})
 	if err != nil {
 		logger.Errorf("[admin] not starting: %v", err)

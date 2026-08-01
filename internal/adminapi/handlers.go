@@ -35,12 +35,40 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ Identity
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// Guild is a server the bot is a member of.
+type Guild struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+// handleGuilds lets the panel show names where it would otherwise print a
+// 19-digit id. The bot is the only component that knows them — the AI service
+// stores ids alone — so this endpoint serves the panel's other screens too.
+//
+// Only guilds the bot is currently in are known. A session left over from a
+// server it has since left has no name here, and the panel falls back to the id
+// rather than inventing one.
+func (s *Server) handleGuilds(w http.ResponseWriter, r *http.Request, _ Identity) {
+	writeJSON(w, http.StatusOK, map[string]any{"guilds": s.guilds()})
+}
+
+func (s *Server) guilds() []Guild {
+	if s.deps.Guilds == nil {
+		return []Guild{}
+	}
+	if g := s.deps.Guilds(); g != nil {
+		return g
+	}
+	return []Guild{}
+}
+
 // guildState joins what the player knows with what the voice listener knows.
 // Either side can be missing and that is not an error: a player outlives the
 // voice connection that created it (nothing ever destroys one), and a listener
 // can exist in a guild where nothing has been played yet.
 type guildState struct {
 	GuildID string             `json:"guild_id"`
+	Name    string             `json:"name,omitempty"`
 	Player  *player.State      `json:"player,omitempty"`
 	Voice   *voice.VoiceStatus `json:"voice,omitempty"`
 
@@ -78,6 +106,12 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request, _ Identity)
 	for _, vs := range s.voiceStatus() {
 		g := at(vs.GuildID)
 		g.Voice = &vs
+	}
+
+	for _, g := range s.guilds() {
+		if st, ok := byGuild[g.ID]; ok {
+			st.Name = g.Name
+		}
 	}
 
 	out := make([]*guildState, 0, len(byGuild))

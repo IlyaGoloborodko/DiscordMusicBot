@@ -45,6 +45,11 @@ type Deps struct {
 	Players     *player.Manager
 	Events      *telemetry.Store
 	VoiceStatus func() []voice.VoiceStatus
+
+	// Guilds resolves guild ids to names. Only the bot can: it holds the
+	// discordgo state cache. The AI service stores nothing but ids, so the panel
+	// asks here to label its own screens too.
+	Guilds func() []Guild
 }
 
 type Server struct {
@@ -122,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/health", s.guard(s.handleHealth))
 	mux.HandleFunc("GET /admin/state", s.guard(s.handleState))
+	mux.HandleFunc("GET /admin/guilds", s.guard(s.handleGuilds))
 	mux.HandleFunc("GET /admin/events", s.guard(s.handleEvents))
 	mux.HandleFunc("GET /admin/stats/stt", s.guard(s.handleSTTStats))
 	mux.HandleFunc("GET /admin/stats/agent", s.guard(s.handleAgentStats))

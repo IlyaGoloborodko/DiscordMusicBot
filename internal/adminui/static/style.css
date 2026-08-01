@@ -139,10 +139,12 @@ ol.queue li { color: var(--muted); }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; white-space: nowrap; }
-td.mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+.mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
 td.nowrap { white-space: nowrap; }
 
 tr.dropped { opacity: 0.55; }
 
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
 .big { font-size: 26px; font-weight: 600; }
+
+.small { font-size: 12px; margin-bottom: 8px; }

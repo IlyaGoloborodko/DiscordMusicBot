@@ -287,7 +287,13 @@ panel is safe to look at while diagnosing. It exists because the bot kept **noth
 working out why it ignored someone meant grepping hours of `docker logs` for `[stt]`
 lines by eye, hundreds an hour from a single open microphone.
 
-Endpoints, all under `/admin`: `health`, `state`, `events`, `stats/stt`, `stats/agent`.
+Endpoints, all under `/admin`: `health`, `state`, `guilds`, `events`, `stats/stt`,
+`stats/agent`.
+
+- **`guilds` exists because only the bot knows server names.** It holds discordgo's
+  state cache; the AI service stores guild ids and nothing else. The panel resolves
+  names from here for its own screens too, and falls back to the id for a server the
+  bot has since left rather than inventing a label.
 
 - **`stats/agent` lives here, not in the AI service.** The bot sees what the server
   cannot: the calls that never arrived (connection refused, timeouts). Those are exactly

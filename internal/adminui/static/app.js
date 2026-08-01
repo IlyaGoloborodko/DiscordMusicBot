@@ -11,6 +11,16 @@ const $ = (sel) => document.querySelector(sel);
 let me = null;
 let timer = null;
 
+// guildNames maps a Discord guild id to its name. Only the bot knows them, so it
+// is fetched once from there and reused everywhere — including the AI sessions
+// screen, whose own service stores nothing but ids.
+let guildNames = new Map();
+
+// guildLabel falls back to the id rather than inventing a name: the bot only
+// knows servers it is currently in, and a session left over from one it has left
+// genuinely has no name to show.
+const guildLabel = (id) => guildNames.get(id) || `Сервер ${id}`;
+
 // ---- transport -------------------------------------------------------------
 
 async function api(path, opts = {}) {
@@ -61,6 +71,22 @@ const secs = (n) => {
 };
 
 const time = (iso) => (iso ? new Date(iso).toLocaleTimeString("ru-RU") : "—");
+
+// when() adds the date once the moment is not today. Sessions can be weeks old,
+// and a bare "19:46:51" on a two-week-old timestamp reads as "this evening" —
+// which is exactly the wrong impression when you are deciding whether a session
+// is stale enough to reset.
+const when = (iso) => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (d.toDateString() === new Date().toDateString()) return d.toLocaleTimeString("ru-RU");
+  return d.toLocaleString("ru-RU", {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+};
+
+const size = (n) =>
+  typeof n !== "number" ? "—" : n < 1024 ? `${n} Б` : `${(n / 1024).toFixed(1)} КБ`;
 
 const outcomePill = (outcome) => {
   const cls = { delivered: "ok", ok: "ok", wake: "ok", nominated: "warn",
@@ -119,7 +145,8 @@ function guildCard(g) {
     : null;
 
   return el("div", { class: "card" },
-    el("h3", {}, `Сервер ${g.guild_id}`),
+    el("h3", {}, g.name || guildLabel(g.guild_id)),
+    el("div", { class: "muted mono small" }, g.guild_id),
     el("dl", { class: "kv" }, rows),
     queue,
   );
@@ -248,7 +275,7 @@ function sessionCard(s) {
     onclick: async () => {
       // The confirm text names the scope explicitly: this wipes the whole
       // server's context, not one channel, and the two are easy to confuse.
-      if (!confirm(`Сбросить память AI для сервера ${guild}?\n\nЭто очистит контекст всей гильдии, а не одного канала.`)) return;
+      if (!confirm(`Сбросить память AI для сервера «${guildLabel(guild)}»?\n\nЭто очистит контекст всего сервера, а не одного канала.`)) return;
       status.textContent = "сбрасываю…";
       try {
         await api(`/api/ai/sessions/${encodeURIComponent(guild)}/memory`, { method: "DELETE" });
@@ -261,10 +288,15 @@ function sessionCard(s) {
   }, "Сбросить память");
 
   return el("div", { class: "card" },
-    el("h3", {}, `Сервер ${guild}`),
+    el("h3", {}, guildLabel(guild)),
+    el("div", { class: "muted mono small" }, guild),
+    // Field names verified against the running service, not guessed from the
+    // spec: it returns message_count / recent_track_count / bytes.
     el("dl", { class: "kv" },
-      el("dt", {}, "Последняя активность"), el("dd", {}, s.last_active ? time(s.last_active) : "—"),
-      el("dt", {}, "Размер памяти"), el("dd", {}, String(s.size ?? s.messages ?? "—")),
+      el("dt", {}, "Последняя активность"), el("dd", {}, when(s.last_active)),
+      el("dt", {}, "Сообщений в памяти"), el("dd", {}, String(s.message_count ?? "—")),
+      el("dt", {}, "Треков в истории"), el("dd", {}, String(s.recent_track_count ?? "—")),
+      el("dt", {}, "Объём"), el("dd", {}, size(s.bytes)),
     ),
     el("div", { class: "toolbar" }, reset, status),
   );
@@ -290,11 +322,13 @@ function show(view) {
   scheduleRefresh(view);
 }
 
-// Only the live state auto-refreshes. Events and stats are things you read, and
-// having the table reshuffle underneath you mid-sentence is worse than stale.
+// The live state always refreshes — it is a live view, and a stale one is
+// misleading rather than merely old. Events and stats deliberately do not:
+// those are things you read, and a table reshuffling mid-sentence is worse than
+// being a minute behind.
 function scheduleRefresh(view) {
   clearInterval(timer);
-  if (view === "state" && $("#autorefresh").checked) {
+  if (view === "state") {
     timer = setInterval(loadState, 5000);
   }
 }
@@ -324,7 +358,14 @@ async function start() {
   $("#ev-since").addEventListener("change", loadEvents);
   $("#stats-refresh").addEventListener("click", loadStats);
   $("#sessions-refresh").addEventListener("click", loadSessions);
-  $("#autorefresh").addEventListener("change", () => scheduleRefresh("state"));
+
+  // Fetched once, before the first view renders, so ids are labelled from the
+  // start instead of flickering into names a moment later. A failure here is not
+  // fatal: every screen falls back to showing the id.
+  try {
+    const data = await api("/api/bot/guilds");
+    guildNames = new Map(((data && data.guilds) || []).map((g) => [g.id, g.name]));
+  } catch { /* ids it is */ }
 
   const initial = location.hash.replace("#", "");
   show(loaders[initial] ? initial : "state");
