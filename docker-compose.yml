@@ -146,11 +146,23 @@ services:
       # and rebuilding the image must not spend that budget every deploy.
       - admin-certs:/data
     ports:
-      # 8080 is bound to loopback so that, with no ADMIN_DOMAIN set, the panel is
-      # reachable only through an SSH tunnel. Setting ADMIN_DOMAIN switches the
-      # gateway to :443 (plus :80 for the ACME challenge) — publish those two
-      # instead when you go public.
+      # All three are published so that switching between the two modes is a
+      # matter of setting ADMIN_DOMAIN, with no compose edit and no override
+      # file — which matters because the deploy workflow runs a plain
+      # `docker compose up` and would not pick one up.
+      #
+      # Only one mode listens at a time. Without ADMIN_DOMAIN the gateway binds
+      # 8080 and nothing answers on 80/443; with it, the gateway moves to 443
+      # (80 serves the ACME challenge and redirects) and nothing answers on 8080.
+      # A published port with no listener behind it refuses connections, so the
+      # unused pair is not an exposure.
+      #
+      # 8080 stays on loopback deliberately: that is the SSH-tunnel path, and it
+      # is the one port that must never be reachable from the internet, since in
+      # that mode there is no TLS.
       - "127.0.0.1:8080:8080"
+      - "80:80"
+      - "443:443"
     depends_on:
       bot:
         condition: service_started
