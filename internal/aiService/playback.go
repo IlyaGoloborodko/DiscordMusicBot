@@ -26,12 +26,26 @@ const (
 // the listener skipped after two still logged five. Only playback knows what was
 // really heard, so only the bot can send this.
 type PlaybackEvent struct {
-	Session    AgentSession `json:"session"`
-	TrackID    string       `json:"track_id"`
-	Provider   string       `json:"provider,omitempty"`
-	PlayedMs   int64        `json:"played_ms"`
-	DurationMs int64        `json:"duration_ms,omitempty"`
-	Reason     string       `json:"reason,omitempty"`
+	Session  AgentSession `json:"session"`
+	TrackID  string       `json:"track_id"`
+	Provider string       `json:"provider,omitempty"`
+
+	// Title/Uploader/URL travel with the event because a track started by slash
+	// command never passes through the agent: the service has only ever seen its
+	// id, so its stored row ends up with the title set to the raw id and no
+	// uploader at all — which is what an admin panel would then display. The bot
+	// holds the metadata either way, so sending it costs nothing and is the only
+	// place the gap can be closed.
+	//
+	// Optional on purpose: the service keeps its track_id fallback, so an older
+	// bot that omits them stays correct.
+	Title    string `json:"title,omitempty"`
+	Uploader string `json:"uploader,omitempty"`
+	URL      string `json:"url,omitempty"`
+
+	PlayedMs   int64  `json:"played_ms"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // playbackAddr is where playback reports go. It defaults to AI_SERVICE_ADDR so

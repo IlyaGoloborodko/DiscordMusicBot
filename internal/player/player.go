@@ -61,9 +61,18 @@ const (
 	cmdSnapshot
 )
 
+// snapshot is the run loop's answer to "what is going on". It carries whole
+// tracks rather than titles because the admin API needs ids and durations too.
+//
+// Deliberately NOT a second command kind: cmdSnapshot is answered in two places
+// — the idle wait in handle() and inline in playItem, the latter so that asking
+// during playback does not block until the track ends. Widening the existing
+// reply keeps both paths correct by construction; a new kind would have to
+// remember playItem, and forgetting it would hang every request made while music
+// was playing, which is most of them.
 type snapshot struct {
-	nowPlaying string
-	queue      []string
+	nowPlaying aiService.Track
+	queue      []aiService.Track
 }
 
 // overlayBuf holds a 48kHz-stereo PCM clip that the music stream drains frame by
@@ -364,14 +373,96 @@ func (p *Player) Stop() { p.send(command{kind: cmdStop}) }
 
 // Snapshot returns the current track title and the queued titles.
 func (p *Player) Snapshot() (string, []string) {
-	reply := make(chan snapshot, 1)
-	p.send(command{kind: cmdSnapshot, reply: reply})
-	select {
-	case s := <-reply:
-		return s.nowPlaying, s.queue
-	case <-p.done:
+	s, ok := p.snapshot(context.Background())
+	if !ok {
 		return "", nil
 	}
+	titles := make([]string, 0, len(s.queue))
+	for _, t := range s.queue {
+		titles = append(titles, t.Title)
+	}
+	return s.nowPlaying.Title, titles
+}
+
+// snapshot asks the run loop what it is holding. ok is false if the answer did
+// not arrive — the player shut down, or ctx expired.
+//
+// The context matters for the admin API and nothing else: every other caller is
+// a Discord handler that can afford to wait, but an HTTP request must not hang
+// on a wedged player. Both the send and the receive honour it, since a full
+// command buffer would otherwise block before the request was even queued.
+func (p *Player) snapshot(ctx context.Context) (snapshot, bool) {
+	reply := make(chan snapshot, 1)
+	select {
+	case p.cmdCh <- command{kind: cmdSnapshot, reply: reply}:
+	case <-p.done:
+		return snapshot{}, false
+	case <-ctx.Done():
+		return snapshot{}, false
+	}
+
+	select {
+	case s := <-reply:
+		return s, true
+	case <-p.done:
+		return snapshot{}, false
+	case <-ctx.Done():
+		return snapshot{}, false
+	}
+}
+
+// GuildID is the guild this player belongs to. Fixed when the player is built
+// and never rebound (only the voice connection and text channel are), so it is
+// safe to read directly — and it has to be, since it is what identifies a player
+// whose run loop is not answering.
+func (p *Player) GuildID() string { return p.guildID }
+
+// State is everything the admin panel shows for one guild.
+type State struct {
+	GuildID    string            `json:"guild_id"`
+	ChannelID  string            `json:"channel_id,omitempty"`
+	NowPlaying *aiService.Track  `json:"now_playing,omitempty"`
+	Queue      []aiService.Track `json:"queue"`
+	QueueLen   int               `json:"queue_len"`
+	Volume     int               `json:"volume"`
+	Paused     bool              `json:"paused"`
+	Playing    bool              `json:"playing"`
+}
+
+// State reports what this player is doing. Returns false if the run loop did not
+// answer within ctx — the caller should report that as unavailable rather than
+// as an idle player, because "no answer" and "nothing playing" are different
+// facts and conflating them would hide exactly the failure worth seeing.
+func (p *Player) State(ctx context.Context) (State, bool) {
+	s, ok := p.snapshot(ctx)
+	if !ok {
+		return State{}, false
+	}
+	return p.stateFrom(s)
+}
+
+// stateFrom combines the run loop's answer with the live atomics. Split out from
+// State so the projection can be tested without standing up a run goroutine —
+// the atomics and the binding are safe to read from anywhere, only the queue
+// needs the round trip.
+func (p *Player) stateFrom(s snapshot) (State, bool) {
+	st := State{
+		GuildID:   p.guildID,
+		ChannelID: p.chID(),
+		Queue:     s.queue,
+		QueueLen:  len(s.queue),
+		Volume:    p.Volume(),
+		Paused:    p.isPaused(),
+		Playing:   p.musicPlaying.Load(),
+	}
+	if st.Queue == nil {
+		st.Queue = []aiService.Track{} // marshals as [], not null
+	}
+	if s.nowPlaying.ID != "" || s.nowPlaying.Title != "" {
+		now := s.nowPlaying
+		st.NowPlaying = &now
+	}
+	return st, true
 }
 
 // ---- run loop ----
@@ -582,6 +673,9 @@ func (p *Player) reportPlayback(track aiService.Track, frames int64, reason stri
 		Session:    aiService.AgentSession{GuildID: p.guildID, ChannelID: p.chID()},
 		TrackID:    track.ID,
 		Provider:   track.Provider,
+		Title:      track.Title,
+		Uploader:   track.Uploader,
+		URL:        track.URL,
 		PlayedMs:   frames * stream.FrameMs,
 		DurationMs: int64(track.Duration * 1000),
 		Reason:     reason,
@@ -682,11 +776,7 @@ func (p *Player) playItem(play func(ctx context.Context) error) *command {
 }
 
 func (p *Player) snapshotNow() snapshot {
-	titles := make([]string, 0, len(p.queue))
-	for _, t := range p.queue {
-		titles = append(titles, t.Title)
-	}
-	return snapshot{nowPlaying: p.nowPlaying.Title, queue: titles}
+	return snapshot{nowPlaying: p.nowPlaying, queue: append([]aiService.Track(nil), p.queue...)}
 }
 
 // djLine asks the agent for a short spoken DJ transition. Runs on the loop

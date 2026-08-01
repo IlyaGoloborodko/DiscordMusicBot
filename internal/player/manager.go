@@ -39,3 +39,20 @@ func (m *Manager) Lookup(guildID string) (*Player, bool) {
 	p, ok := m.players[guildID]
 	return p, ok
 }
+
+// All returns every live player, for callers that must report on all guilds at
+// once rather than look one up.
+//
+// It copies the map out instead of taking a callback so the caller can do slow
+// work — State() waits on each player's run loop — without holding m.mu. Holding
+// it would mean one wedged player blocks every /join in the process.
+func (m *Manager) All() []*Player {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make([]*Player, 0, len(m.players))
+	for _, p := range m.players {
+		out = append(out, p)
+	}
+	return out
+}

@@ -8,6 +8,7 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.19.0
+	golang.org/x/crypto v0.32.0
 	layeh.com/gopus v0.0.0-20210501142526-1ee02d434e32
 )
 
@@ -15,8 +16,9 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/crypto v0.32.0 // indirect
+	golang.org/x/net v0.21.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 )
 
 replace github.com/bwmarrin/discordgo => ./third_party/discordgo

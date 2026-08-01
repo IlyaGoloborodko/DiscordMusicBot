@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The panel shows voice transcripts and playback history. Nothing about it
+     should end up in a search index or a referrer sent to another site. -->
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Марина — панель</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div id="signin" class="signin hidden">
+  <h1>Марина</h1>
+  <p class="muted">Панель управления ботом</p>
+  <a class="button" href="/auth/login">Войти через Discord</a>
+  <p id="signin-error" class="error hidden"></p>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <strong>Марина</strong>
+    <nav>
+      <button class="tab" data-view="state">Состояние</button>
+      <button class="tab" data-view="events">События</button>
+      <button class="tab" data-view="stats">Статистика</button>
+      <button class="tab" data-view="sessions">Сессии AI</button>
+    </nav>
+    <span class="spacer"></span>
+    <span id="whoami" class="muted"></span>
+    <form method="post" action="/auth/logout"><button class="link">Выйти</button></form>
+  </header>
+
+  <main>
+    <section id="view-state" class="view">
+      <div class="toolbar">
+        <label><input type="checkbox" id="autorefresh" checked> Обновлять автоматически</label>
+        <span id="state-age" class="muted"></span>
+      </div>
+      <div id="guilds"></div>
+    </section>
+
+    <section id="view-events" class="view hidden">
+      <div class="toolbar">
+        <select id="ev-kind">
+          <option value="">все события</option>
+          <option value="stt_gate">stt_gate — вердикты гейта</option>
+          <option value="stt_command">stt_command — точное распознавание</option>
+          <option value="ai_call">ai_call — вызовы AI</option>
+        </select>
+        <select id="ev-since">
+          <option value="">за всё время</option>
+          <option value="15m">15 минут</option>
+          <option value="1h">1 час</option>
+          <option value="24h">сутки</option>
+        </select>
+        <input id="ev-user" placeholder="Discord user id" size="20">
+        <button id="ev-refresh">Обновить</button>
+      </div>
+      <p id="ev-note" class="muted"></p>
+      <div id="events"></div>
+    </section>
+
+    <section id="view-stats" class="view hidden">
+      <div class="toolbar"><button id="stats-refresh">Обновить</button></div>
+      <div id="stats"></div>
+    </section>
+
+    <section id="view-sessions" class="view hidden">
+      <div class="toolbar"><button id="sessions-refresh">Обновить</button></div>
+      <p class="muted">
+        Память AI-сервиса хранится <strong>по серверу</strong>, а не по каналу — сброс
+        очищает контекст всей гильдии.
+      </p>
+      <div id="sessions"></div>
+    </section>
+  </main>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

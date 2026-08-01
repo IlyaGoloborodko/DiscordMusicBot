@@ -4,6 +4,7 @@ import (
 	"context"
 	"discordAudio/internal/aiService"
 	"discordAudio/internal/logger"
+	"discordAudio/internal/telemetry"
 	"log"
 	"os"
 	"strconv"
@@ -226,6 +227,57 @@ func StopVoiceListener(vc *discordgo.VoiceConnection) {
 	if ok {
 		close(l.done)
 	}
+}
+
+// VoiceStatus is one live voice connection, as the admin panel sees it. The
+// two clocks are separate on purpose and mean different things: IdleSeconds is
+// "nothing has happened", AloneSeconds is "there are no people here" — playing
+// music holds the first open indefinitely, which is why the second exists.
+type VoiceStatus struct {
+	GuildID       string `json:"guild_id"`
+	VoiceChannel  string `json:"voice_channel_id,omitempty"`
+	TextChannel   string `json:"text_channel_id,omitempty"`
+	IdleSeconds   int64  `json:"idle_seconds"`
+	AloneSeconds  int64  `json:"alone_seconds,omitempty"`
+	ArmedSpeakers int    `json:"armed_speakers"`
+}
+
+// Status reports every voice connection the bot is listening on.
+//
+// The registry is keyed by *VoiceConnection rather than by guild, so the guild
+// id comes off the connection itself. The lock is held only long enough to copy
+// the map out: the per-listener reads below touch atomics and a sync.Map, and
+// none of them should be done while /join is waiting on listenMu.
+func Status() []VoiceStatus {
+	listenMu.Lock()
+	live := make(map[*discordgo.VoiceConnection]*voiceListener, len(listeners))
+	for vc, l := range listeners {
+		live[vc] = l
+	}
+	listenMu.Unlock()
+
+	out := make([]VoiceStatus, 0, len(live))
+	for vc, l := range live {
+		st := VoiceStatus{
+			GuildID:      vc.GuildID,
+			VoiceChannel: vc.ChannelID,
+			TextChannel:  l.chID(),
+			IdleSeconds:  int64(l.idleFor().Seconds()),
+		}
+		if since := l.aloneSince.Load(); since != 0 {
+			st.AloneSeconds = int64(time.Since(time.Unix(0, since)).Seconds())
+		}
+		l.armed.Range(func(_, v any) bool {
+			// Expired entries are only cleared when that speaker is next heard,
+			// so count what is still open rather than what is still stored.
+			if until, _ := v.(time.Time); time.Now().Before(until) {
+				st.ArmedSpeakers++
+			}
+			return true
+		})
+		out = append(out, st)
+	}
+	return out
 }
 
 func (l *voiceListener) run(vc *discordgo.VoiceConnection) {
@@ -598,9 +650,22 @@ func (l *voiceListener) decide(vc *discordgo.VoiceConnection, pcm []int16, gate,
 	if lvl >= sttLogAll {
 		log.Printf("[stt] user=%s speechMs=%d VOSK=%q near=%v armed=%v", userID, speechMs, gate, near, armed)
 	}
+	// Every gate verdict is recorded, nominated or not. Counting only the ones
+	// that got through would make the false-alarm rate unknowable, and the
+	// dropped ones are the bulk of what an open microphone produces — the very
+	// thing that was previously only visible by grepping the log by eye.
+	gateEv := telemetry.Event{
+		Kind: telemetry.KindSTTGate, GuildID: vc.GuildID, UserID: userID,
+		SpeechMs: speechMs, Gate: gate, Near: near, Armed: armed,
+	}
 	if !near && !armed {
+		gateEv.Outcome = telemetry.OutcomeDropped
+		recordSTT(gateEv)
 		return // nothing like the name, and no command is expected -> stop here
 	}
+	gateEv.Outcome = telemetry.OutcomeNominated
+	recordSTT(gateEv)
+
 	if l.chID() == "" {
 		return
 	}
@@ -615,16 +680,31 @@ func (l *voiceListener) decide(vc *discordgo.VoiceConnection, pcm []int16, gate,
 		return
 	}
 
+	// From here on the outcome of this utterance is one of the exits below, and
+	// each one fills in cmdEv before returning.
+	cmdEv := telemetry.Event{
+		Kind: telemetry.KindSTTCommand, GuildID: vc.GuildID, UserID: userID,
+		SpeechMs: speechMs, Gate: gate, Near: near, Armed: armed,
+	}
+
 	raw, err := transcribe(ctx, pcm)
 	if err != nil {
 		logger.Errorf("[stt] transcribe error: %v", err)
+		cmdEv.Outcome, cmdEv.Err = telemetry.OutcomeError, err.Error()
+		recordSTT(cmdEv)
 		return
 	}
 	command := cleanTranscript(raw)
+	cmdEv.Text, cmdEv.Command = raw, command
 	if lvl >= sttLogAll {
 		log.Printf("[stt] user=%s STT=%q command=%q", userID, raw, command)
 	}
 	if command == "" {
+		// cleanTranscript rejected everything: a hallucinated credit line, or our
+		// own prompt echoed back. Worth counting — a rise here means the echo
+		// defence is doing work, or that it has started firing on real speech.
+		cmdEv.Outcome = telemetry.OutcomeEmpty
+		recordSTT(cmdEv)
 		return
 	}
 
@@ -638,6 +718,8 @@ func (l *voiceListener) decide(vc *discordgo.VoiceConnection, pcm []int16, gate,
 			if lvl >= sttLogCommands {
 				log.Printf("[stt] user=%s gate false alarm: VOSK=%q -> STT=%q", userID, gate, command)
 			}
+			cmdEv.Outcome = telemetry.OutcomeFalseAlarm
+			recordSTT(cmdEv)
 			return
 		}
 		if after == "" {
@@ -646,9 +728,14 @@ func (l *voiceListener) decide(vc *discordgo.VoiceConnection, pcm []int16, gate,
 			if lvl >= sttLogCommands {
 				log.Printf("[stt] user=%s wake word heard, waiting for command", userID)
 			}
+			cmdEv.Outcome = telemetry.OutcomeWake
+			recordSTT(cmdEv)
 			return
 		}
 	}
+
+	cmdEv.Outcome = telemetry.OutcomeDelivered
+	recordSTT(cmdEv)
 
 	l.disarm(ssrc)
 	l.handleAI(vc, userID, command)
@@ -701,7 +788,12 @@ func (l *voiceListener) handleAI(vc *discordgo.VoiceConnection, userID, message 
 	// what is playing and what is next.
 	now, queue := p.Snapshot()
 
+	// Timed on this side rather than in the AI service on purpose: the bot is the
+	// only one that sees the calls which never arrived — connection refused,
+	// DNS, timeouts — and those are the failures that look like "the bot ignored
+	// me" from the channel.
 	ai := aiService.NewClient()
+	started := time.Now()
 	resp, err := ai.Agent(ctx, aiService.AgentRequest{
 		Session: l.agentSession(vc.GuildID, userID),
 		Message: message,
@@ -714,15 +806,26 @@ func (l *voiceListener) handleAI(vc *discordgo.VoiceConnection, userID, message 
 		},
 		Tools: aiService.PlayerTools(),
 	})
+	ev := telemetry.Event{
+		Kind: telemetry.KindAICall, GuildID: vc.GuildID, UserID: userID,
+		Trigger:   aiService.TriggerUser,
+		LatencyMs: time.Since(started).Milliseconds(),
+	}
 	if err != nil {
 		// Not gated on STT_LOG_LEVEL: that knob decides how much of the
 		// transcript stream is worth printing, not whether a dead AI service is
 		// worth knowing about.
 		logger.Errorf("[stt] AI error: %v", err)
+		ev.Outcome, ev.Err = telemetry.OutcomeError, err.Error()
+		telemetry.Record(ev)
 		return
 	}
+
+	action, tracks := resp.PrimaryEffect()
+	ev.Outcome, ev.Action, ev.ToolCalls = telemetry.OutcomeOK, action, len(resp.ToolCalls)
+	telemetry.Record(ev)
+
 	if lvl >= sttLogCommands {
-		action, tracks := resp.PrimaryEffect()
 		log.Printf("[stt] <- AI tool_calls=%d action=%q tracks=%d display=%q clarify=%q",
 			len(resp.ToolCalls), action, len(tracks), resp.DisplayText, resp.Clarification)
 	}

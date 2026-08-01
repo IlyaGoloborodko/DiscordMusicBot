@@ -68,6 +68,16 @@ and `...\media-source-service`.
 - `STT_LOG_LEVEL` — 0 silent / 1 commands (default) / 2 all transcripts (separate knob,
   it decides which transcripts get logged at all, not their severity).
 - `AI_DEBUG=1` — log raw `[ai] ->` request / `[ai] <-` response to the AI service.
+- `ADMIN_API_KEY` / `ADMIN_ADDR` — the admin API (see below). **The API is off unless
+  the key is set**, and setting `ADMIN_ADDR` *without* a key is a startup error rather
+  than an open endpoint — there is no configuration that serves without a token.
+  `ADMIN_ADDR` defaults to `127.0.0.1:8090` (loopback, so a laptop run is not exposed);
+  compose overrides it to `0.0.0.0:8090`, which is still only reachable inside the
+  compose network because nothing publishes the port.
+- `TELEMETRY_FILE` / `TELEMETRY_MAX_EVENTS` / `TELEMETRY_MAX_FILE_MB` — where the
+  operational history goes (default: memory only, 2000 events, 32MB before it rotates
+  to one `.1`). In compose it is a named volume, so the history that explains a crash
+  survives the restart that followed it.
 - `DJ_BREAK_EVERY` — DJ comment every N tracks (default 3).
 - `WHISPER_BIN`/`WHISPER_MODEL`/`WHISPER_SERVER_ADDR` — DEAD (local whisper removed);
   safe to delete from `.env`.
@@ -83,6 +93,14 @@ and `...\media-source-service`.
 - `internal/aiService` — HTTP client + models + tool registry (`client.go`,
   `models.go`, `tools.go`).
 - `internal/music` — search-service HTTP client.
+- `internal/telemetry` — ring buffer + JSONL of what the bot decided (`store.go`).
+- `internal/adminapi` — read-only HTTP API for the admin panel (`server.go`,
+  `handlers.go`, `stats.go`, `auth.go`).
+- `internal/adminauth` — **leaf package, must keep zero imports**: the header
+  names and roles shared by the bot, the gateway and the AI service.
+- `internal/adminui` + `cmd/adminui` — the panel's gateway: Discord OAuth2,
+  signed-cookie sessions, authenticating reverse proxy, embedded static panel.
+- `deploy/admin/Dockerfile` — builds the gateway (context is the repo root).
 - `third_party/discordgo` — **vendored fork** of discordgo, editable, via
   `replace github.com/bwmarrin/discordgo => ./third_party/discordgo`.
 
@@ -230,6 +248,11 @@ by slash command, which are just as honest a taste signal as the AI's picks.
 - **No dedup, no aggregation.** Two plays are two events; a repeat listen is itself the
   signal. `reason` is reported as observed — a skip is not a dislike, tracks get skipped
   for having just played.
+- **`title`/`uploader`/`url` ride along** (optional fields). A track started by slash
+  command never passes through the agent, so the service has only ever seen its id and
+  stores the row with the title set to the raw YouTube id and no uploader — which is
+  what an admin panel then shows. The bot holds the metadata regardless, so sending it
+  is free. They stay optional: the service keeps its `track_id` fallback.
 - Address: `PLAYBACK_SERVICE_ADDR`, falling back to `AI_SERVICE_ADDR`.
 
 ## AI contract — client-declared tools (variant A)
@@ -258,14 +281,109 @@ over the (already gain-reduced) music with saturating adds — so the assistant 
 immediately at full volume over quiet music. With nothing playing, the old `pending`
 path is used.
 
+## Admin API + telemetry (`internal/adminapi`, `internal/telemetry`)
+Read-only, and deliberately so: nothing here can change playback or settings, so the
+panel is safe to look at while diagnosing. It exists because the bot kept **nothing** —
+working out why it ignored someone meant grepping hours of `docker logs` for `[stt]`
+lines by eye, hundreds an hour from a single open microphone.
+
+Endpoints, all under `/admin`: `health`, `state`, `events`, `stats/stt`, `stats/agent`.
+
+- **`stats/agent` lives here, not in the AI service.** The bot sees what the server
+  cannot: the calls that never arrived (connection refused, timeouts). Those are exactly
+  the failures that look like "the bot ignored me" from the channel. The AI service was
+  told not to build its own.
+- **Recording never blocks the caller.** `Record` takes a short lock on the ring and
+  hands the disk copy to a buffered channel; when that channel is full the event is
+  **dropped**. Callers are on the voice receive loop, where waiting means losing Opus
+  packets. Same rule as playback reports: analytics must never delay the music.
+- **Every aggregate reports its `window`.** The buffer is a fixed-size ring, so once it
+  is full "how many times did this happen" silently becomes "…in the last N events". A
+  response that did not say so would be lying by omission — hence `truncated`.
+- **Transcripts are gated twice.** Whether they are captured follows `STT_LOG_LEVEL`
+  (reused rather than adding a second knob that could disagree with it and leave speech
+  recorded after somebody thought they had turned it off); whether they are served is
+  decided by role — **owner only**. Everyone else gets the same event with the decisions
+  intact and the words removed, which is all an operator needs.
+
+**Auth contract, shared with the gateway and the AI service:** `X-Admin-Token` (compared
+with `subtle.ConstantTimeCompare`), plus `X-Admin-User-Id`, `X-Admin-User-Name`,
+`X-Admin-Role` (`viewer` < `moderator` < `owner`). The identity headers are **ignored
+without a valid token** and an unrecognised role becomes `viewer`, never `owner`: on the
+wire those headers are unauthenticated hints, and trusting them would let anything that
+reaches the port inside the compose network declare itself owner. User authentication
+(Discord OAuth2) belongs to the gateway; the gateway also strips any client-supplied
+`X-Admin-*` before adding its own.
+
+**Why `snapshot` was widened instead of adding a command kind.** `cmdSnapshot` is
+answered in *two* places — `handle()` and inline in `playItem` — the second so that
+asking during playback does not block until the track ends. A new kind would have had to
+remember `playItem`, and forgetting it would hang every request made while music was
+playing, which is most of them. Widening the existing reply keeps both paths correct by
+construction. `State` also takes a `context`: a wedged player must yield a 503, not a
+hung panel, and `unavailable` is reported distinctly from "nothing playing".
+
+## The panel's gateway (`internal/adminui`, `cmd/adminui`)
+The only process in the stack meant to be reachable from outside the compose network,
+which is why every security decision lives there. Separate binary from the bot on
+purpose: the panel stays up while the bot restarts — exactly when someone wants to look
+at it — and neither service ends up owning the other's settings.
+
+- **Discord OAuth2, scope `identify` only.** No passwords are stored, revocation is a
+  list edit, and the admins already have Discord accounts. The `state` parameter is
+  mandatory: without it somebody could hand a victim a callback URL carrying the
+  attacker's authorization code and silently log them into the wrong account.
+- **Sessions are a signed cookie, no server-side table.** Signed, not encrypted — the
+  payload is a user id, a name and a role, none of them secret; what matters is that
+  the browser cannot *change* it. `HttpOnly`, `SameSite=Lax`, `Secure` when serving TLS.
+- **The role is re-read from the env lists on every request**, never trusted from the
+  cookie. Removing someone from `.env` takes effect at their next request instead of
+  whenever their 12-hour session happens to lapse.
+- **The proxy strips every `X-Admin-*` header the client sent before adding its own**
+  (`stripAdminHeaders`, by prefix so a header added later is covered). Skipping this
+  would let a browser send `X-Admin-Role: owner` and have it forwarded alongside our
+  service token, which the backends trust. `TestForgedAdminHeadersAreStripped` is the
+  test for this package.
+- **The service token never reaches the browser.** It is attached server-side, so a
+  stolen session cannot be replayed against the backends directly.
+- **Access lists are env** (`ADMIN_OWNER_IDS` / `_MODERATOR_IDS` / `_VIEWER_IDS`), not a
+  database: adding someone is a `.env` edit and a restart, and there is no bootstrap
+  problem or "last owner removed" trap. Empty lists are a **startup refusal** — "no
+  list" must never read as "let anyone in". A duplicated id gets the strongest role.
+- **TLS is opt-in via `ADMIN_DOMAIN`**: set it and the gateway serves `:443` with
+  automatic Let's Encrypt certs (plus `:80` for the ACME challenge, and `HostWhitelist`
+  so it is not a certificate mill for anyone else's SNI); leave it blank and it serves
+  plain HTTP, which is what you want while reaching the panel over an SSH tunnel.
+
+**`internal/adminauth` must keep zero imports.** The gateway used to reach the shared
+header names through `internal/adminapi`, which imports `internal/voice`, which imports
+the cgo opus bindings — so `CGO_ENABLED=0 go build ./cmd/adminui` failed outright and
+the container image could not be built. Anything that both the gateway and the bot need
+belongs in that leaf package.
+
+**The panel is hand-written HTML/CSS/JS with no bundler**, embedded via `embed.FS`.
+Images are built on the server — one core, 2GB, shared with Postgres, Redis and Vosk —
+where a Vite build is slow enough to risk being OOM-killed. The JS builds DOM nodes and
+never assigns `innerHTML`: track titles and transcripts are other people's text.
+
 ## KNOWN GOTCHAS
 - **AI session-memory poisoning** (biggest live issue): the AI service keeps
-  conversation memory per guild/channel. If it once returns bad output (English canned
-  text, `play_track` instead of `play`, empty tool args, no tool_call), it few-shot
-  copies its own bad history and keeps failing **for that channel**. Proven: same request
-  in a FRESH channel works; in the poisoned channel it returns `action=none`/`play_track`.
-  Fix is service-side (don't feed raw assistant outputs back into memory; reset memory).
-  To test the bot, use a fresh channel or clear that session's memory.
+  conversation memory **per guild, not per channel**. Its session key is
+  `v7:<guild_id>` (falling back to user id, then `"global"`), and the `channel_id` the
+  bot sends on every `/agent` call is accepted and then never used. If the service once
+  returns bad output (English canned text, `play_track` instead of `play`, empty tool
+  args, no tool_call), it few-shot copies its own bad history and keeps failing **for
+  that whole server**.
+  **This entry used to claim the memory was per channel**, citing "same request in a
+  FRESH channel works" as proof. The schema refutes it — a second channel of the same
+  guild reads the same row — so that test cannot have shown what it was recorded as
+  showing; most likely it was run on a different *server*. Which leaves the cause
+  genuinely open: memory is still the prime suspect, but the channel-isolation evidence
+  for it does not hold, and nothing has re-established it. Treat "reset the memory and
+  it's fixed" as untested until seen live again.
+  To test the bot, use a different SERVER, or clear the session with
+  `POST /agent/forget` (it wipes both Postgres and Redis). Fix is service-side: don't
+  feed raw assistant outputs back into memory.
 - **Slow cold builds**: CGO `gopus` (compiles libopus C) + `cloudflare/circl` (16 pkgs
   for DAVE). Incremental builds are ~0.4s; editing `third_party/` forces a full rebuild.
   Prefer `go build -o bot.exe ./cmd/bot` then run the binary.

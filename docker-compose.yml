@@ -81,11 +81,57 @@ services:
       PLAYBACK_SERVICE_ADDR: http://ai:8000
       SEARCH_SERVICE_ADDR: http://media-source-service:9000
       VOSK_SERVER_ADDR: ws://vosk:2700
+      # The admin API binds 0.0.0.0 *inside the container*, which is reachable
+      # only from this compose network — no `ports:` entry publishes it. The
+      # loopback default that protects a laptop would here make it unreachable
+      # from the gateway, which is the only thing meant to call it.
+      ADMIN_ADDR: 0.0.0.0:8090
+      TELEMETRY_FILE: /data/telemetry.jsonl
+    volumes:
+      # Survives `up --build`, so the history that explains a crash is still
+      # there after the restart that followed it.
+      - bot-telemetry:/data
     depends_on:
       bot-redis:
         condition: service_healthy
       vosk:
         condition: service_started
 
+  # The admin panel's gateway. The ONLY service in the stack with a published
+  # port: everything else talks over the compose network, and the panel's own
+  # requests reach the bot and the AI service through here, carrying a service
+  # token this container holds and the browser never sees.
+  #
+  # It authenticates people against Discord (OAuth2) and maps them to a role
+  # from the ADMIN_*_IDS lists. With no lists set it refuses to start rather
+  # than fall back to letting anyone in.
+  admin:
+    build:
+      context: .
+      dockerfile: deploy/admin/Dockerfile
+    container_name: discord-admin
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      BOT_ADMIN_ADDR: http://bot:8090
+      AI_ADMIN_ADDR: http://ai:8000
+      ADMIN_CERT_CACHE: /data/certs
+    volumes:
+      # Certificates outlive the container: Let's Encrypt rate-limits issuance,
+      # and rebuilding the image must not spend that budget every deploy.
+      - admin-certs:/data
+    ports:
+      # 8080 is bound to loopback so that, with no ADMIN_DOMAIN set, the panel is
+      # reachable only through an SSH tunnel. Setting ADMIN_DOMAIN switches the
+      # gateway to :443 (plus :80 for the ACME challenge) — publish those two
+      # instead when you go public.
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      bot:
+        condition: service_started
+
 volumes:
   bot-redis-data:
+  bot-telemetry:
+  admin-certs:

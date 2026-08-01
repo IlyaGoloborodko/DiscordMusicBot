@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"discordAudio/internal/adminapi"
 	"discordAudio/internal/discord"
 	"discordAudio/internal/logger"
 	"discordAudio/internal/player"
 	"discordAudio/internal/storage"
+	"discordAudio/internal/telemetry"
 	"discordAudio/internal/voice"
 	"log"
 	"os"
@@ -71,8 +73,16 @@ func main() {
 	trackCache := voice.NewTrackCache(rdb)
 	voice.InitTrackCache(trackCache)
 
-	voice.InitPlayerManager(player.NewManager())
+	// Kept in a variable rather than built inline: the admin API reports on these
+	// players, and until now the only reference in the process was the
+	// unexported global inside package voice.
+	players := player.NewManager()
+	voice.InitPlayerManager(players)
 	voice.CheckWakeWordConfig()
+
+	events := telemetry.New(telemetry.ConfigFromEnv())
+	telemetry.Init(events)
+	defer events.Close()
 
 	token := os.Getenv("DISCORD_TOKEN")
 	if token == "" {
@@ -105,6 +115,19 @@ func main() {
 		log.Fatal("error register Discord commands,", err)
 	}
 
+	// The admin API is optional and never fatal: a misconfigured diagnostic must
+	// not stop the bot. The one refusal that IS worth failing on is an empty
+	// token, and even then we only decline to serve — see adminapi.New.
+	admin, err := adminapi.NewFromEnv(adminapi.Deps{
+		Players:     players,
+		Events:      events,
+		VoiceStatus: voice.Status,
+	})
+	if err != nil {
+		logger.Errorf("[admin] not starting: %v", err)
+	}
+	admin.Start()
+
 	// Startup is INFO, so it only reaches Telegram under TG_LOG_LEVEL=INFO. It
 	// used to go there unconditionally; at the default ERROR the phone now stays
 	// quiet on a restart.
@@ -115,6 +138,10 @@ func main() {
 	<-stop
 
 	log.Println("shutting down...")
+	// Stop serving before cancel(): a request in flight reads player state, and
+	// letting those finish first keeps the last thing in the log a clean stop
+	// rather than a burst of failures caused by our own shutdown.
+	admin.Shutdown(context.Background())
 	cancel()
 
 	dg.Close()
